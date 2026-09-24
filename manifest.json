@@ -1,11 +1,11 @@
 {
   "name": "ToastFlix",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "scrapers": [
     {
       "id": "toastflix-cb01",
       "name": "CB01",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Film e Serie TV da CB01 - MixDrop links",
       "resources": ["stream"],
       "contentLanguage": ["it"],
@@ -18,7 +18,7 @@
     {
       "id": "toastflix-eurostreaming",
       "name": "Eurostreaming",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "description": "Serie TV da Eurostreaming",
       "resources": ["stream"],
       "contentLanguage": ["it"],

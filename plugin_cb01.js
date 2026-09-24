@@ -326,11 +326,13 @@ function extractMixDrop(mdId, quality, cb) {
         lastErr = "stream url not found (host=" + host + " hasPacker=" + hasPacker + " len=" + html.length + ")";
         return tryHost(idx + 1);
       }
+      var isHD = (quality === '1080p' || /hd/i.test(String(quality || '')));
+      var streamLabel = isHD ? "MixDrop HD" : "MixDrop";
       cb({
         url: streamUrl,
-        name: "CB01",
-        title: "MixDrop",
-        quality: quality || '720p',
+        name: "CB01 - " + streamLabel,
+        title: streamLabel,
+        quality: isHD ? '1080p' : (quality || '720p'),
         behaviorHints: { notWebReady: true },
         headers: {
           "User-Agent": USER_AGENT,

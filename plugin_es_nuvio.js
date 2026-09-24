@@ -1268,8 +1268,8 @@ function resolveClickacc(startUrl, kind, jar) {
         return tryMixDropHosts(mixMatch[1]).then(function (res) {
           return {
             url: res.url,
-            name: "Eurostreaming",
-            title: "MixDrop",
+            name: "Eurostreaming - MixDrop (Clicka)",
+            title: "MixDrop (Clicka)",
             quality: "720p",
             behaviorHints: { notWebReady: true },
             headers: { "User-Agent": ES_UA, "Referer": "https://" + res.host + "/" }
@@ -1283,8 +1283,8 @@ function resolveClickacc(startUrl, kind, jar) {
       return extractTurbovid(current, activeJar).then(function (video) {
         return {
           url: video.url,
-          name: "Eurostreaming",
-          title: "Turbovid",
+          name: "Eurostreaming - Turbovid (Clicka)",
+          title: "Turbovid (Clicka)",
           quality: "1080p",
           behaviorHints: { notWebReady: true },
           headers: { "User-Agent": video.headers["User-Agent"] || ES_UA, "Referer": current, "Origin": video.headers["Origin"] || "https://turbovid.eu" }
@@ -1295,8 +1295,8 @@ function resolveClickacc(startUrl, kind, jar) {
       return extractDeltabit(current, activeJar).then(function (video) {
         return {
           url: video.url,
-          name: "Eurostreaming",
-          title: "DeltaBit",
+          name: "Eurostreaming - DeltaBit (Clicka)",
+          title: "DeltaBit (Clicka)",
           quality: "1080p",
           behaviorHints: { notWebReady: true },
           headers: { "User-Agent": video.headers["User-Agent"] || ES_UA, "Referer": current, "Origin": video.headers["Origin"] || "https://deltabit.co" }
@@ -1324,8 +1324,8 @@ function resolveClickacc(startUrl, kind, jar) {
             if (md) return tryMixDropHosts(md.id).then(function (res) {
               return {
                 url: res.url,
-                name: "Eurostreaming",
-                title: "MixDrop",
+                name: "Eurostreaming - MixDrop (Clicka)",
+                title: "MixDrop (Clicka)",
                 quality: "720p",
                 behaviorHints: { notWebReady: true },
                 headers: { "User-Agent": ES_UA, "Referer": "https://" + res.host + "/" }
@@ -1334,7 +1334,7 @@ function resolveClickacc(startUrl, kind, jar) {
           }
           // Check for m3u8
           var m3u8Url = _findM3u8(text);
-          if (m3u8Url) return { url: m3u8Url, name: 'Eurostreaming', title: 'Stream', behaviorHints: { notWebReady: true } };
+          if (m3u8Url) return { url: m3u8Url, name: 'Eurostreaming - Stream (Clicka)', title: 'Stream (Clicka)', behaviorHints: { notWebReady: true } };
           // Next continue URL
           var nextUrl = _findNextUprotUrl(text, finalUrl);
           if (!nextUrl || nextUrl === current) return Promise.reject(new Error('Clickacc: no next URL after captcha'));
@@ -1356,8 +1356,8 @@ function resolveClickacc(startUrl, kind, jar) {
         if (md2) return tryMixDropHosts(md2.id).then(function (res) {
           return {
             url: res.url,
-            name: "Eurostreaming",
-            title: "MixDrop",
+            name: "Eurostreaming - MixDrop (Clicka)",
+            title: "MixDrop (Clicka)",
             quality: "720p",
             behaviorHints: { notWebReady: true },
             headers: { "User-Agent": ES_UA, "Referer": "https://" + res.host + "/" }
@@ -1366,7 +1366,7 @@ function resolveClickacc(startUrl, kind, jar) {
       }
       // Check for m3u8 inline
       var m3u8Url2 = _findM3u8(text);
-      if (m3u8Url2) return { url: m3u8Url2, name: 'Eurostreaming', title: 'Stream', behaviorHints: { notWebReady: true } };
+      if (m3u8Url2) return { url: m3u8Url2, name: 'Eurostreaming - Stream (Clicka)', title: 'Stream (Clicka)', behaviorHints: { notWebReady: true } };
       // Next continue URL
       var nextUrl2 = _findNextUprotUrl(text, finalUrl);
       if (!nextUrl2 || nextUrl2 === current) return Promise.reject(new Error('Clickacc: dead end'));
@@ -1417,7 +1417,7 @@ function _runNuvioTest(resolve) {
         }
         resolve([{
           url: "https://a-delivery36.mxcontent.net/v2/xw18kr1mtpke63.mp4",
-          name: "Eurostreaming",
+          name: "Eurostreaming - MixDrop [Test]",
           title: "MixDrop [Test]",
           quality: "720p",
           behaviorHints: { notWebReady: true },
