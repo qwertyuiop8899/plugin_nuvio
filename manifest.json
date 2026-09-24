@@ -1,6 +1,6 @@
 {
   "name": "ToastFlix",
-  "version": "1.0.9",
+  "version": "1.1.0",
   "scrapers": [
     {
       "id": "toastflix-cb01",
@@ -18,7 +18,7 @@
     {
       "id": "toastflix-eurostreaming",
       "name": "Eurostreaming",
-      "version": "1.0.9",
+      "version": "1.1.0",
       "description": "Serie TV da Eurostreaming",
       "resources": ["stream"],
       "contentLanguage": ["it"],

@@ -132,7 +132,12 @@ function _decodeEntities(s) {
 }
 
 function _sleep(ms) {
-  return Promise.resolve();
+  return new Promise(function (resolve) {
+    var waitMs = Math.max(ms || 1000, 3600);
+    var start = Date.now();
+    while (Date.now() - start < waitMs) {}
+    resolve();
+  });
 }
 
 function _isDigit(s) { return /^\d+$/.test(s); }
