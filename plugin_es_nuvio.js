@@ -79,14 +79,13 @@ var ES_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML
 function _customFetch(url, options, timeoutMs) {
   var targetUrl = url;
   var lower = String(url || '').toLowerCase();
-  var isClicaDeltabit = lower.indexOf('clicka.cc/delta') >= 0 || lower.indexOf('clicka.cc/adelta') >= 0;
-  var isClicaTurbovid = lower.indexOf('clicka.cc/tv/') >= 0 || lower.indexOf('clicka.cc/tva/') >= 0;
+  var isClicka = lower.indexOf('clicka.cc') >= 0;
   var isDeltabitHost = lower.indexOf('deltabit') >= 0;
   var isTurbovidHost = lower.indexOf('turbovid') >= 0;
   var isSafego = lower.indexOf('safego.cc') >= 0;
   var isEurostreaming = lower.indexOf('eurostreaming') >= 0;
 
-  if (isClicaDeltabit || isClicaTurbovid || isDeltabitHost || isTurbovidHost || isSafego || isEurostreaming) {
+  if (isClicka || isDeltabitHost || isTurbovidHost || isSafego || isEurostreaming) {
     if (lower.indexOf('workers.dev') < 0) {
       targetUrl = 'https://vidclick.leanhhu061208-775.workers.dev/?url=' + encodeURIComponent(url);
     }
@@ -122,8 +121,12 @@ var MD_HOSTS = [
   'm1xdrop.net', 'mxdrop.net', 'miixdrop.net'
 ];
 
+// Relaxed MixDrop hostname pattern (covers mi×drop, m1x_drop, etc.)
 var MD_PAT = 'm[i1!ì]{1,2}[x×][ _-]?d[r]{1,2}[o0ø][ _-]?p';
 
+// =========================================================================
+// HELPERS
+// =========================================================================
 function _decodeEntities(s) {
   if (!s) return '';
   return s
@@ -132,6 +135,8 @@ function _decodeEntities(s) {
     .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
     .replace(/&amp;/g, '&');
 }
+
+
 
 function _sleep(ms) {
   return new Promise(function (r) { setTimeout(r, ms); });
@@ -186,16 +191,18 @@ function _jarGet(url, jar) {
 function _jarClear() { _cookieJar = {}; }
 
 // =========================================================================
-// CLICKA.CC FETCH WRAPPERS
+// CLICKA.CC FETCH WRAPPERS (manual redirect following + cookie persistence)
 // =========================================================================
 function _extractCookies(r, finalUrl, jar) {
   try {
     if (!r.headers) return;
+    // Try modern getSetCookie() first
     var all = typeof r.headers.getSetCookie === 'function' ? r.headers.getSetCookie() : null;
     if (all && all.length) {
       for (var i = 0; i < all.length; i++) _jarSet(finalUrl, all[i], jar);
       return;
     }
+    // Fallback: iterate all headers
     if (typeof r.headers.forEach === 'function') {
       r.headers.forEach(function (v, k) {
         if (k.toLowerCase() === 'set-cookie') _jarSet(finalUrl, v, jar);
@@ -221,11 +228,10 @@ function _follow(url, options, maxHops, jar) {
       }
 
       var finalFetchUrl = curUrl;
-      var isClicaDeltabit = curUrl.includes('clicka.cc/delta') || curUrl.includes('clicka.cc/adelta');
-      var isClicaTurbovid = curUrl.includes('clicka.cc/tv/') || curUrl.includes('clicka.cc/tva/');
+      var isClicka = curUrl.includes('clicka.cc');
       var isSafego = curUrl.includes('safego.cc');
       
-      if (isClicaDeltabit || isClicaTurbovid || isSafego) {
+      if (isClicka || isSafego) {
         finalFetchUrl = 'https://vidclick.leanhhu061208-775.workers.dev/?url=' + encodeURIComponent(curUrl);
         fetchOpts.headers = fetchOpts.headers || {};
         fetchOpts.headers['User-Agent'] = ES_UA;
@@ -257,7 +263,7 @@ function _follow(url, options, maxHops, jar) {
         return r.text().then(function (text) {
           resolve({ ok: true, status: r.status, text: text, url: finalUrl });
         });
-      }).catch(function (err) { reject(err); });
+      }).catch(function (err) { clearTimeout(fetchTimer); reject(err); });
     }
     doFetch(url);
   });
@@ -298,16 +304,22 @@ function _formEncode(obj) {
 }
 
 // =========================================================================
-// PNG DECODER
+// PNG DECODER (Buffer + zlib, no external deps)
 // =========================================================================
+// zlib replaced with bundled _unzlibSync
+
 function _pngDecode(b64) {
+  
+  // Decode base64 to raw bytes
   var raw = _atob(b64);
   var len = raw.length;
   var bytes = new Uint8Array(len);
   for (var i = 0; i < len; i++) bytes[i] = raw.charCodeAt(i) & 0xff;
+  // Validate PNG signature
   if (bytes[0] !== 137 || bytes[1] !== 80 || bytes[2] !== 78 || bytes[3] !== 71) {
     throw new Error('Not a PNG');
   }
+  // Parse chunks
   var pos = 8;
   var width, height, bitDepth, colorType;
   var idatData = [];
@@ -329,10 +341,12 @@ function _pngDecode(b64) {
     pos += 12 + clen;
   }
   if (!width || !height) throw new Error('PNG: no IHDR');
+  // Only support RGB (colorType=2) or RGBA (colorType=6), bitDepth=8
   var bytesPerPixel = (colorType === 6) ? 4 : (colorType === 2) ? 3 : 1;
   if (bitDepth !== 8 || (colorType !== 2 && colorType !== 6)) {
     throw new Error('PNG: unsupported format colorType=' + colorType + ' bitDepth=' + bitDepth);
   }
+  // Concatenate IDAT data and decompress
   var totalLen = 0;
   for (var di = 0; di < idatData.length; di++) totalLen += idatData[di].length;
   var idatCombined = new Uint8Array(totalLen);
@@ -342,6 +356,7 @@ function _pngDecode(b64) {
     off += idatData[di2].length;
   }
   var decompressed = (typeof _unzlibSync !== 'undefined' ? _unzlibSync : globalThis._unzlibSync)(idatCombined);
+  // Reconstruct image rows with filter
   var bpp = bytesPerPixel;
   var rowBytes = width * bpp;
   var pixels = new Array(height);
@@ -382,19 +397,163 @@ function _pngDecode(b64) {
 }
 
 // =========================================================================
-// CAPTCHA OCR - 10x10 template matching
+// CAPTCHA OCR - native 10x10 template matching (all digits confirmed by user)
 // =========================================================================
+// Full pixel data for all 10 digits (1=black, 0=white), 10 rows each.
+// The captcha font is always the same fixed bitmap font.
+// Format: data[d] = { w: width, pixels: [[row0],[row1],...] }
+
 var DIGIT_PIXELS = [
-  { w: 8, pixels: [[0, 0, 0, 1, 1, 0, 0, 0], [0, 0, 1, 1, 1, 1, 0, 0], [0, 1, 1, 0, 0, 1, 1, 0], [1, 1, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 1, 1], [0, 1, 1, 0, 0, 1, 1, 0], [0, 0, 1, 1, 1, 1, 0, 0], [0, 0, 0, 1, 1, 0, 0, 0]] },
-  { w: 3, pixels: [[0, 1, 1], [1, 1, 1], [1, 1, 1], [0, 1, 1], [0, 1, 1], [0, 1, 1], [0, 1, 1], [0, 1, 1], [0, 1, 1], [1, 1, 1]] },
-  { w: 7, pixels: [[0, 1, 1, 1, 1, 0, 0], [1, 1, 0, 0, 1, 1, 0], [1, 0, 0, 0, 0, 1, 1], [0, 0, 0, 0, 0, 1, 1], [0, 0, 0, 0, 1, 1, 0], [0, 0, 0, 1, 1, 0, 0], [0, 0, 1, 1, 0, 0, 0], [0, 1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0, 0], [1, 1, 1, 1, 1, 1, 1]] },
-  { w: 5, pixels: [[1, 1, 1, 0, 0], [0, 0, 1, 1, 0], [0, 0, 0, 1, 1], [0, 0, 1, 1, 0], [1, 1, 1, 0, 0], [0, 0, 1, 1, 0], [0, 0, 0, 1, 1], [0, 0, 0, 1, 1], [0, 0, 1, 1, 0], [1, 1, 1, 0, 0]] },
-  { w: 6, pixels: [[0, 0, 0, 0, 1, 1], [0, 0, 0, 1, 1, 1], [0, 0, 1, 1, 1, 1], [0, 1, 1, 0, 1, 1], [1, 1, 0, 0, 1, 1], [1, 0, 0, 0, 1, 1], [1, 1, 1, 1, 1, 1], [0, 0, 0, 0, 1, 1], [0, 0, 0, 0, 1, 1], [0, 0, 0, 0, 1, 1]] },
-  { w: 8, pixels: [[1, 1, 1, 1, 1, 1, 1, 0], [1, 1, 0, 0, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0, 0, 0], [1, 1, 0, 1, 1, 1, 0, 0], [1, 1, 1, 0, 0, 1, 1, 0], [0, 0, 0, 0, 0, 0, 1, 1], [0, 0, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 1, 1], [0, 1, 1, 0, 0, 1, 1, 0], [0, 0, 1, 1, 1, 1, 0, 0]] },
-  { w: 7, pixels: [[0, 0, 1, 1, 1, 1, 0], [0, 1, 1, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 1], [1, 1, 0, 0, 0, 0, 0], [1, 1, 0, 1, 1, 1, 0], [1, 1, 1, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 1], [1, 1, 0, 0, 0, 0, 1], [0, 1, 1, 0, 0, 1, 1], [0, 0, 1, 1, 1, 1, 0]] },
-  { w: 8, pixels: [[1, 1, 1, 1, 1, 1, 1, 1], [0, 0, 0, 0, 0, 0, 1, 1], [0, 0, 0, 0, 0, 0, 1, 1], [0, 0, 0, 0, 0, 1, 1, 0], [0, 0, 0, 0, 1, 1, 0, 0], [0, 0, 0, 1, 1, 0, 0, 0], [0, 0, 1, 1, 0, 0, 0, 0], [0, 1, 1, 0, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0, 0, 0]] },
-  { w: 8, pixels: [[0, 0, 1, 1, 1, 1, 0, 0], [0, 1, 1, 0, 0, 1, 1, 0], [1, 1, 0, 0, 0, 0, 1, 1], [0, 1, 1, 0, 0, 1, 1, 0], [0, 0, 1, 1, 1, 1, 0, 0], [0, 1, 1, 0, 0, 1, 1, 0], [1, 1, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 1, 1], [0, 1, 1, 0, 0, 1, 1, 0], [0, 0, 1, 1, 1, 1, 0, 0]] },
-  { w: 7, pixels: [[0, 1, 1, 1, 1, 0, 0], [1, 1, 0, 0, 1, 1, 0], [1, 0, 0, 0, 0, 1, 1], [1, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 1, 1, 1], [0, 1, 1, 1, 0, 1, 1], [0, 0, 0, 0, 0, 1, 1], [1, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 1, 1, 0], [0, 1, 1, 1, 1, 0, 0]] }
+  // 0 (w=8)
+  {
+    w: 8, pixels: [
+      [0, 0, 0, 1, 1, 0, 0, 0],
+      [0, 0, 1, 1, 1, 1, 0, 0],
+      [0, 1, 1, 0, 0, 1, 1, 0],
+      [1, 1, 0, 0, 0, 0, 1, 1],
+      [1, 1, 0, 0, 0, 0, 1, 1],
+      [1, 1, 0, 0, 0, 0, 1, 1],
+      [1, 1, 0, 0, 0, 0, 1, 1],
+      [0, 1, 1, 0, 0, 1, 1, 0],
+      [0, 0, 1, 1, 1, 1, 0, 0],
+      [0, 0, 0, 1, 1, 0, 0, 0]
+    ]
+  },
+  // 1 (w=3)
+  {
+    w: 3, pixels: [
+      [0, 1, 1],
+      [1, 1, 1],
+      [1, 1, 1],
+      [0, 1, 1],
+      [0, 1, 1],
+      [0, 1, 1],
+      [0, 1, 1],
+      [0, 1, 1],
+      [0, 1, 1],
+      [1, 1, 1]
+    ]
+  },
+  // 2 (w=7)
+  {
+    w: 7, pixels: [
+      [0, 1, 1, 1, 1, 0, 0],
+      [1, 1, 0, 0, 1, 1, 0],
+      [1, 0, 0, 0, 0, 1, 1],
+      [0, 0, 0, 0, 0, 1, 1],
+      [0, 0, 0, 0, 1, 1, 0],
+      [0, 0, 0, 1, 1, 0, 0],
+      [0, 0, 1, 1, 0, 0, 0],
+      [0, 1, 1, 0, 0, 0, 0],
+      [1, 1, 0, 0, 0, 0, 0],
+      [1, 1, 1, 1, 1, 1, 1]
+    ]
+  },
+  // 3 (w=5)
+  {
+    w: 5, pixels: [
+      [1, 1, 1, 0, 0],
+      [0, 0, 1, 1, 0],
+      [0, 0, 0, 1, 1],
+      [0, 0, 1, 1, 0],
+      [1, 1, 1, 0, 0],
+      [0, 0, 1, 1, 0],
+      [0, 0, 0, 1, 1],
+      [0, 0, 0, 1, 1],
+      [0, 0, 1, 1, 0],
+      [1, 1, 1, 0, 0]
+    ]
+  },
+  // 4 (w=6)
+  {
+    w: 6, pixels: [
+      [0, 0, 0, 0, 1, 1],
+      [0, 0, 0, 1, 1, 1],
+      [0, 0, 1, 1, 1, 1],
+      [0, 1, 1, 0, 1, 1],
+      [1, 1, 0, 0, 1, 1],
+      [1, 0, 0, 0, 1, 1],
+      [1, 1, 1, 1, 1, 1],
+      [0, 0, 0, 0, 1, 1],
+      [0, 0, 0, 0, 1, 1],
+      [0, 0, 0, 0, 1, 1]
+    ]
+  },
+  // 5 (w=8)
+  {
+    w: 8, pixels: [
+      [1, 1, 1, 1, 1, 1, 1, 0],
+      [1, 1, 0, 0, 0, 0, 0, 0],
+      [1, 1, 0, 0, 0, 0, 0, 0],
+      [1, 1, 0, 1, 1, 1, 0, 0],
+      [1, 1, 1, 0, 0, 1, 1, 0],
+      [0, 0, 0, 0, 0, 0, 1, 1],
+      [0, 0, 0, 0, 0, 0, 1, 1],
+      [1, 1, 0, 0, 0, 0, 1, 1],
+      [0, 1, 1, 0, 0, 1, 1, 0],
+      [0, 0, 1, 1, 1, 1, 0, 0]
+    ]
+  },
+  // 6 (w=7)
+  {
+    w: 7, pixels: [
+      [0, 0, 1, 1, 1, 1, 0],
+      [0, 1, 1, 0, 0, 1, 1],
+      [1, 1, 0, 0, 0, 0, 1],
+      [1, 1, 0, 0, 0, 0, 0],
+      [1, 1, 0, 1, 1, 1, 0],
+      [1, 1, 1, 0, 0, 1, 1],
+      [1, 1, 0, 0, 0, 0, 1],
+      [1, 1, 0, 0, 0, 0, 1],
+      [0, 1, 1, 0, 0, 1, 1],
+      [0, 0, 1, 1, 1, 1, 0]
+    ]
+  },
+  // 7 (w=8)
+  {
+    w: 8, pixels: [
+      [1, 1, 1, 1, 1, 1, 1, 1],
+      [0, 0, 0, 0, 0, 0, 1, 1],
+      [0, 0, 0, 0, 0, 0, 1, 1],
+      [0, 0, 0, 0, 0, 1, 1, 0],
+      [0, 0, 0, 0, 1, 1, 0, 0],
+      [0, 0, 0, 1, 1, 0, 0, 0],
+      [0, 0, 1, 1, 0, 0, 0, 0],
+      [0, 1, 1, 0, 0, 0, 0, 0],
+      [1, 1, 0, 0, 0, 0, 0, 0],
+      [1, 1, 0, 0, 0, 0, 0, 0]
+    ]
+  },
+  // 8 (w=8)
+  {
+    w: 8, pixels: [
+      [0, 0, 1, 1, 1, 1, 0, 0],
+      [0, 1, 1, 0, 0, 1, 1, 0],
+      [1, 1, 0, 0, 0, 0, 1, 1],
+      [0, 1, 1, 0, 0, 1, 1, 0],
+      [0, 0, 1, 1, 1, 1, 0, 0],
+      [0, 1, 1, 0, 0, 1, 1, 0],
+      [1, 1, 0, 0, 0, 0, 1, 1],
+      [1, 1, 0, 0, 0, 0, 1, 1],
+      [0, 1, 1, 0, 0, 1, 1, 0],
+      [0, 0, 1, 1, 1, 1, 0, 0]
+    ]
+  },
+  // 9 (w=7)
+  {
+    w: 7, pixels: [
+      [0, 1, 1, 1, 1, 0, 0],
+      [1, 1, 0, 0, 1, 1, 0],
+      [1, 0, 0, 0, 0, 1, 1],
+      [1, 0, 0, 0, 0, 1, 1],
+      [1, 1, 0, 0, 1, 1, 1],
+      [0, 1, 1, 1, 0, 1, 1],
+      [0, 0, 0, 0, 0, 1, 1],
+      [1, 0, 0, 0, 0, 1, 1],
+      [1, 1, 0, 0, 1, 1, 0],
+      [0, 1, 1, 1, 1, 0, 0]
+    ]
+  }
 ];
 
 function _binarize(pixels, w, h, bpp) {
@@ -408,6 +567,7 @@ function _binarize(pixels, w, h, bpp) {
       var b = pixels[y][idx + 2];
       var mx = Math.max(r, g, b);
       var mn = Math.min(r, g, b);
+      // Threshold from main.py: r<110 && g<110 && b<170 && max-min<80
       bin[y][x] = (r < 110 && g < 110 && b < 170 && (mx - mn) < 80) ? 1 : 0;
     }
   }
@@ -415,6 +575,7 @@ function _binarize(pixels, w, h, bpp) {
 }
 
 function _segmentChars(bin, w, h) {
+  // Vertical projection: count black pixels per column
   var proj = new Array(w);
   for (var x = 0; x < w; x++) {
     var count = 0;
@@ -423,7 +584,8 @@ function _segmentChars(bin, w, h) {
     }
     proj[x] = count;
   }
-  var threshold = Math.round(h * 0.1);
+  // Find character segments by looking for gaps in projection
+  var threshold = Math.round(h * 0.1); // at least 10% height
   var segments = [];
   var inChar = false;
   var start = 0;
@@ -441,6 +603,7 @@ function _segmentChars(bin, w, h) {
     }
   }
   if (inChar && w - start >= 2) segments.push({ x1: start, x2: w - 1 });
+  // Filter out noise segments (too narrow/tall ratio)
   var refined = [];
   for (var si = 0; si < segments.length; si++) {
     var seg = segments[si];
@@ -481,8 +644,9 @@ function _cropSegVert(segData, segW, segH) {
 
 function _digitMatchScore(segData, segW, segH, template) {
   var tw = template.w;
-  var th = 10;
-  if (segH !== th) return 0;
+  var th = 10; // all templates are 10 rows
+  if (segH !== th) return 0; // height must match (after cropping)
+  // Determine which is shorter/longer in width
   var sw = segW < tw ? segW : tw;
   var lw = segW < tw ? tw : segW;
   var shortData = segW < tw ? segData : template.pixels;
@@ -510,7 +674,7 @@ function _classifyDigit(segData, segW, segH) {
   var bestDigit = -1;
   for (var d = 0; d < 10; d++) {
     var tmpl = DIGIT_PIXELS[d];
-    if (Math.abs(cw - tmpl.w) > 2) continue;
+    if (Math.abs(cw - tmpl.w) > 2) continue; // skip if width differs too much
     var score = _digitMatchScore(cropped.data, cw, ch, tmpl);
     if (score > bestScore) {
       bestScore = score;
@@ -518,6 +682,7 @@ function _classifyDigit(segData, segW, segH) {
     }
   }
   if (bestScore >= 0.75) return bestDigit;
+  // Fallback: try width range ±3
   for (var d2 = 0; d2 < 10; d2++) {
     var tmpl2 = DIGIT_PIXELS[d2];
     if (Math.abs(cw - tmpl2.w) > 3) continue;
@@ -596,14 +761,19 @@ function _findCaptchaFormAction(text, baseUrl) {
 // HTML URL PATTERN PARSERS
 // =========================================================================
 function _findProceedToVideoUrl(text) {
+  // clicka.cc/adelta/{id} -> Deltabit
+  // clicka.cc/tva/{id}    -> Turbovid
+  // clicka.cc/amix/{id}   -> MixDrop
   var m = text.match(/https?:\/\/clicka\.cc\/(?:adelta|tva|amix)\/[^"'<>\s]+/i);
   if (m) return m[0];
+  // Direct video host links (with TLD)
   var dm = text.match(new RegExp('https?://[^\\s"\'>]*' + MD_PAT + '[^\\s"\'>]+', 'i'));
   if (dm) return dm[0];
   var dt = text.match(/https?:\/\/[^\s"'>]*?deltabit\.[a-z]+\/[A-Za-z0-9]{6,}/i);
   if (dt) return dt[0];
   var tv = text.match(/https?:\/\/[^\s"'>]*?turbovid\.[a-z]+\/[A-Za-z0-9]{6,}/i);
   if (tv) return tv[0];
+  // "Proceed to video" button/link
   var aM = text.match(/<a\b[^>]*href=["']([^"']+)["'][^>]*>[\s\S]*?Proceed\s*to\s*video/i);
   return aM ? aM[1] : null;
 }
@@ -627,6 +797,7 @@ function _findTurbovidUrl(text) {
 function _findNextUprotUrl(text, baseUrl) {
   var anchors = text.match(/<a\b[^>]*\bhref=(?:"([^"]+)"|'([^']+)'|([^\s>]+))[^>]*>([\s\S]*?)<\/a>/gi);
   if (!anchors) return null;
+  // Priority: "Continue" links pointing to maxstream/clicka/uprots/adelta
   for (var ai = 0; ai < anchors.length; ai++) {
     var aTag = anchors[ai];
     var hrefM = aTag.match(/\bhref=(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i);
@@ -638,6 +809,7 @@ function _findNextUprotUrl(text, baseUrl) {
       if (resolved) return resolved;
     }
   }
+  // Fallback: any "Continue" link
   for (var ai2 = 0; ai2 < anchors.length; ai2++) {
     var aTag2 = anchors[ai2];
     var hrefM2 = aTag2.match(/\bhref=(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i);
@@ -681,11 +853,14 @@ function _findStreamSource(text) {
 }
 
 function _isDeltabitHost(url) { return /deltabit\./i.test(String(url || "")); }
+
 function _isTurbovidHost(url) { return /turbovid\./i.test(String(url || "")); }
+
 function _isMixdropHost(url) { return new RegExp(MD_PAT, "i").test(String(url || "")); }
 
+
 // =========================================================================
-// PACKED JS UNPACKER
+// PACKED JS UNPACKER (Packer by Dean Edwards)
 // =========================================================================
 function unpackPackedJs(packed) {
   var m = packed.match(/eval\(function\(p,a,c,k,e,d\)\{[\s\S]*?\}\(\s*'((?:\\.|[^'\\])*)'\s*,\s*(\d+|\[\])\s*,\s*(\d+)\s*,\s*'((?:\\.|[^'\\])*)'\s*\.split\(['"]\|['"]\)/);
@@ -718,6 +893,7 @@ function _solveCaptchaPage(text, currentUrl, jar) {
     if (!_hasCaptcha(text)) return resolve({ text: text, url: currentUrl });
     var imageSrc = _captchaImageSrc(text);
     if (!imageSrc) return reject(new Error('captcha image not found'));
+    // Extract base64 data from data URI
     var b64 = imageSrc.replace(/^data:image\/(?:png|jpe?g);base64,/, '');
     var guess = _ocrSolve(b64);
     if (!guess || guess.length < 3 || guess.length > 6) {
@@ -740,7 +916,7 @@ function _solveCaptchaPage(text, currentUrl, jar) {
 }
 
 // =========================================================================
-// MIXDROP EXTRACTION
+// MIXDROP EXTRACTION (promise-based)
 // =========================================================================
 function fetchMixDrop(host, id) {
   return new Promise(function (resolve, reject) {
@@ -764,6 +940,7 @@ function fetchMixDrop(host, id) {
         }
         var streamUrl = _findStreamSource(combined);
         if (!streamUrl) {
+          // Try MD-specific patterns
           var mdPats = [
             /(?:MDCore|vsConfig)\.wurl\s*=\s*["']([^"']+)["']/,
             /wurl\s*[:=]\s*["']([^"']+)["']/,
@@ -805,10 +982,10 @@ function tryMixDropHosts(id) {
 }
 
 // =========================================================================
-// TURBOVID EXTRACTION
+// TURBOVID EXTRACTION  (GET landing -> parse form -> POST imhuman -> source)
 // =========================================================================
 function extractTurbovid(pageUrl, jar) {
-  return new Promise(function (resolve, reject) {
+    return new Promise(function (resolve, reject) {
     var landingHeaders = {
       'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -829,9 +1006,11 @@ function extractTurbovid(pageUrl, jar) {
         return r.text();
       })
       .then(function (html) {
+        // Try inline source first
         var finalOrigin = _getUrlOrigin(pageUrl);
         var source = _findStreamSource(html);
         if (source) return resolve({ url: source, headers: { 'User-Agent': landingHeaders['User-Agent'], 'Referer': pageUrl, 'Origin': finalOrigin } });
+        // Parse form
         var formData = {};
         var ir = /<input\b[^>]*>/gi;
         var im;
@@ -857,6 +1036,7 @@ function extractTurbovid(pageUrl, jar) {
         };
         var cookieStr2 = _jarGet(pageUrl, jar);
         if (cookieStr2) postHeaders['Cookie'] = cookieStr2;
+        // Sleep 5s before POST (Turbovid requires delay)
         return _sleep(5000).then(function () {
           return _customFetch(pageUrl, { method: "POST", headers: postHeaders, body: _formEncode(formData), redirect: "manual" }, 30000);
         });
@@ -886,6 +1066,7 @@ function extractTurbovid(pageUrl, jar) {
           source = _findStreamSource(combined);
         }
         if (!source) {
+          // Retry GET after POST
           var retryHeaders = {
             'User-Agent': landingHeaders['User-Agent'],
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -910,7 +1091,7 @@ function extractTurbovid(pageUrl, jar) {
 }
 
 // =========================================================================
-// DELTABIT EXTRACTION
+// DELTABIT EXTRACTION (similar to Turbovid but imhuman='' and 2.5s sleep)
 // =========================================================================
 function extractDeltabit(pageUrl, jar) {
   return new Promise(function (resolve, reject) {
@@ -937,6 +1118,7 @@ function extractDeltabit(pageUrl, jar) {
         var finalOrigin = _getUrlOrigin(pageUrl);
         var source = _findStreamSource(html);
         if (source) return resolve({ url: source, headers: { 'User-Agent': landingHeaders['User-Agent'], 'Referer': pageUrl, 'Origin': finalOrigin } });
+        // Parse form
         var formData = {};
         var ir = /<input\b[^>]*>/gi;
         var im;
@@ -962,6 +1144,7 @@ function extractDeltabit(pageUrl, jar) {
         };
         var cookieStr2 = _jarGet(pageUrl, jar);
         if (cookieStr2) postHeaders['Cookie'] = cookieStr2;
+        // Sleep 2.5s before POST
         return _sleep(2500).then(function () {
           return _customFetch(pageUrl, { method: "POST", headers: postHeaders, body: _formEncode(formData) }, 30000);
         });
@@ -988,7 +1171,25 @@ function extractDeltabit(pageUrl, jar) {
           }
           source = _findStreamSource(combined);
         }
-        if (!source) return reject(new Error('Deltabit: stream source not found'));
+        if (!source) {
+          // Retry GET
+          var retryHeaders = {
+            'User-Agent': landingHeaders['User-Agent'],
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.8,it;q=0.7',
+            'Accept-Encoding': 'identity',
+            'Referer': 'https://safego.cc/'
+          };
+          var cstr = _jarGet(pageUrl, jar);
+          if (cstr) retryHeaders['Cookie'] = cstr;
+          return _customFetch(pageUrl, { headers: retryHeaders }, 15000)
+            .then(function (r2) { return r2.text(); })
+            .then(function (html2) {
+              source = _findStreamSource(html2);
+              if (!source) return reject(new Error('Deltabit: stream source not found'));
+              resolve({ url: source, headers: { 'User-Agent': landingHeaders['User-Agent'], 'Referer': pageUrl, 'Origin': finalOrigin } });
+            });
+        }
         resolve({ url: source, headers: { 'User-Agent': landingHeaders['User-Agent'], 'Referer': pageUrl, 'Origin': finalOrigin } });
       })
       .catch(function (err) { reject(err); });
@@ -996,25 +1197,30 @@ function extractDeltabit(pageUrl, jar) {
 }
 
 // =========================================================================
-// FOLLOW REDIRECTOR PAGE
+// FOLLOW REDIRECTOR PAGE  (clicka.cc/adelta/tva/amix -> upstream URL)
 // =========================================================================
 function _followRedirector(url, referer, jar) {
   return _clickaFetch(url, referer, jar).then(function (res) {
     var text = res.text;
+    // Meta refresh
     var metaM = text.match(/<meta[^>]+http-equiv=["']?refresh["']?[^>]+url=["']?([^"'>\s]+)/i);
     if (metaM) {
       var upUrl = _resolveUrl(metaM[1], url);
       if (upUrl) return upUrl;
     }
+    // Canonical
     var canM = text.match(/<link[^>]+rel=["']?canonical["']?[^>]+href=["']([^"']+)["']/i);
     if (canM) return canM[1];
+    // Form action - relative or absolute, resolve against current URL
     var formM = text.match(/<form[^>]+action=["']([^"']+)["']/i);
     if (formM && formM[1] && formM[1] !== '#') {
       var actionUrl = _resolveUrl(formM[1], res.url || url);
       if (actionUrl) return actionUrl;
     }
+    // Direct link to deltabit/turbovid/mixdrop
     var dlM = text.match(new RegExp('https?://[^\\s"\'>]*(?:deltabit|turbovid|' + MD_PAT + ')[^\\s"\'>]*', 'i'));
     if (dlM) return dlM[0];
+    // Fallback to the response URL
     return res.url || url;
   });
 }
@@ -1029,6 +1235,7 @@ function resolveClickacc(startUrl, kind, jar) {
   var activeJar = jar || {};
   function loop(hop) {
     if (hop >= 6) return Promise.reject(new Error('Clickacc: max hops reached'));
+    // Check if current is a redirector URL (clicka.cc/adelta|tva|amix)
     var isRedirector = false;
     try {
       var uHost = _getUrlHost(current);
@@ -1043,17 +1250,18 @@ function resolveClickacc(startUrl, kind, jar) {
         return loop(hop + 1);
       });
     }
+    // Check if we're already on a video host
     if (kind === 'mix' && _isMixdropHost(current)) {
       var mixMatch = current.match(/\/(?:e|f|emb|embed)\/([A-Za-z0-9]+)/i);
       if (mixMatch) {
         return tryMixDropHosts(mixMatch[1]).then(function (res) {
           return {
             url: res.url,
-            name: "Eurostreaming - MixDrop",
-            title: "MixDrop [ITA]",
+            name: "Eurostreaming",
+            title: "MixDrop",
             quality: "720p",
-            headers: { "User-Agent": ES_UA, "Referer": "https://" + res.host + "/" },
-            behaviorHints: { notWebReady: true, proxyHeaders: { request: { "User-Agent": ES_UA, "Referer": "https://" + res.host + "/" } } }
+            behaviorHints: { notWebReady: true },
+            headers: { "User-Agent": ES_UA, "Referer": "https://" + res.host + "/" }
           };
         }).catch(function () {
           return Promise.reject(new Error('MixDrop extraction failed'));
@@ -1064,11 +1272,11 @@ function resolveClickacc(startUrl, kind, jar) {
       return extractTurbovid(current, activeJar).then(function (video) {
         return {
           url: video.url,
-          name: "Eurostreaming - Turbovid",
-          title: "Turbovid [ITA]",
+          name: "Eurostreaming",
+          title: "Turbovid",
           quality: "1080p",
-          headers: { "User-Agent": video.headers["User-Agent"] || ES_UA, "Referer": current, "Origin": video.headers["Origin"] || "https://turbovid.eu" },
-          behaviorHints: { notWebReady: true, proxyHeaders: { request: { "User-Agent": video.headers["User-Agent"] || ES_UA, "Referer": current, "Origin": video.headers["Origin"] || "https://turbovid.eu" } } }
+          behaviorHints: { notWebReady: true },
+          headers: { "User-Agent": video.headers["User-Agent"] || ES_UA, "Referer": current, "Origin": video.headers["Origin"] || "https://turbovid.eu" }
         };
       });
     }
@@ -1076,41 +1284,47 @@ function resolveClickacc(startUrl, kind, jar) {
       return extractDeltabit(current, activeJar).then(function (video) {
         return {
           url: video.url,
-          name: "Eurostreaming - DeltaBit",
-          title: "DeltaBit [ITA]",
+          name: "Eurostreaming",
+          title: "DeltaBit",
           quality: "1080p",
-          headers: { "User-Agent": video.headers["User-Agent"] || ES_UA, "Referer": current, "Origin": video.headers["Origin"] || "https://deltabit.co" },
-          behaviorHints: { notWebReady: true, proxyHeaders: { request: { "User-Agent": video.headers["User-Agent"] || ES_UA, "Referer": current, "Origin": video.headers["Origin"] || "https://deltabit.co" } } }
+          behaviorHints: { notWebReady: true },
+          headers: { "User-Agent": video.headers["User-Agent"] || ES_UA, "Referer": current, "Origin": video.headers["Origin"] || "https://deltabit.co" }
         };
       });
     }
+    // Fetch current URL (captcha page, safego, etc.)
     return _clickaFetch(current, referer, activeJar).then(function (res) {
       var text = res.text;
       var finalUrl = res.url || current;
+      // Check for captcha
       if (_hasCaptcha(text)) {
         return _solveCaptchaPage(text, finalUrl, activeJar).then(function (solved) {
           text = solved.text;
+          // After captcha, check for "Proceed to video"
           var proceedUrl = _findProceedToVideoUrl(text);
           if (proceedUrl && proceedUrl !== current) {
             referer = finalUrl;
             current = proceedUrl;
             return loop(hop + 1);
           }
+          // Check for mixdrop (kind=mix)
           if (kind === 'mix') {
             var md = _findMixdropUrl(text);
             if (md) return tryMixDropHosts(md.id).then(function (res) {
               return {
                 url: res.url,
-                name: "Eurostreaming - MixDrop",
-                title: "MixDrop [ITA]",
+                name: "Eurostreaming",
+                title: "MixDrop",
                 quality: "720p",
-                headers: { "User-Agent": ES_UA, "Referer": "https://" + res.host + "/" },
-                behaviorHints: { notWebReady: true, proxyHeaders: { request: { "User-Agent": ES_UA, "Referer": "https://" + res.host + "/" } } }
+                behaviorHints: { notWebReady: true },
+                headers: { "User-Agent": ES_UA, "Referer": "https://" + res.host + "/" }
               };
             });
           }
+          // Check for m3u8
           var m3u8Url = _findM3u8(text);
           if (m3u8Url) return { url: m3u8Url, name: 'Eurostreaming', title: 'Stream', behaviorHints: { notWebReady: true } };
+          // Next continue URL
           var nextUrl = _findNextUprotUrl(text, finalUrl);
           if (!nextUrl || nextUrl === current) return Promise.reject(new Error('Clickacc: no next URL after captcha'));
           referer = finalUrl;
@@ -1118,27 +1332,31 @@ function resolveClickacc(startUrl, kind, jar) {
           return loop(hop + 1);
         });
       }
+      // No captcha - check for proceed-to-video
       var proceedUrl2 = _findProceedToVideoUrl(text);
       if (proceedUrl2 && proceedUrl2 !== current) {
         referer = finalUrl;
         current = proceedUrl2;
         return loop(hop + 1);
       }
+      // Check for mixdrop (kind=mix)
       if (kind === 'mix') {
         var md2 = _findMixdropUrl(text);
         if (md2) return tryMixDropHosts(md2.id).then(function (res) {
           return {
             url: res.url,
-            name: "Eurostreaming - MixDrop",
-            title: "MixDrop [ITA]",
+            name: "Eurostreaming",
+            title: "MixDrop",
             quality: "720p",
-            headers: { "User-Agent": ES_UA, "Referer": "https://" + res.host + "/" },
-            behaviorHints: { notWebReady: true, proxyHeaders: { request: { "User-Agent": ES_UA, "Referer": "https://" + res.host + "/" } } }
+            behaviorHints: { notWebReady: true },
+            headers: { "User-Agent": ES_UA, "Referer": "https://" + res.host + "/" }
           };
         });
       }
+      // Check for m3u8 inline
       var m3u8Url2 = _findM3u8(text);
       if (m3u8Url2) return { url: m3u8Url2, name: 'Eurostreaming', title: 'Stream', behaviorHints: { notWebReady: true } };
+      // Next continue URL
       var nextUrl2 = _findNextUprotUrl(text, finalUrl);
       if (!nextUrl2 || nextUrl2 === current) return Promise.reject(new Error('Clickacc: dead end'));
       referer = finalUrl;
@@ -1150,7 +1368,8 @@ function resolveClickacc(startUrl, kind, jar) {
 }
 
 // =========================================================================
-// TMDB API helper
+// =========================================================================
+// TMDB API helper (used as fallback when Cinemeta fails)
 // =========================================================================
 var TMDB_API_KEY = '68e094699525b18a70bab2f86b1fa706';
 
@@ -1167,6 +1386,8 @@ function getCinemetaMeta(type, imdbId, cb) {
     .then(function (data) { cb(null, data && data.meta ? data.meta : null); })
     .catch(function () { cb(null, null); });
 }
+
+
 
 function _getTmdbShowMeta(id) {
   return new Promise(function (resolve) {
@@ -1238,17 +1459,18 @@ function getStreams(id, type, season, episode, providerContext) {
       return resolve(cached.streams);
     }
 
-    _getTmdbShowMeta(rawId).then(function (meta) {
-      if (!meta) {
-        return new Promise(function(resMeta) {
+    var resolveMetaPromise = /^tt\d+/i.test(rawId)
+      ? new Promise(function(resMeta) {
           getCinemetaMeta('series', rawId, function(err, cMeta) {
-            if (cMeta && cMeta.name) resMeta({ name: cMeta.name, original_name: cMeta.name, year: cMeta.releaseInfo });
-            else resMeta(null);
+            if (cMeta && cMeta.name) {
+              return resMeta({ name: cMeta.name, original_name: cMeta.name, year: cMeta.releaseInfo });
+            }
+            _getTmdbShowMeta(rawId).then(resMeta);
           });
-        });
-      }
-      return meta;
-    }).then(function (meta) {
+        })
+      : _getTmdbShowMeta(rawId);
+
+    resolveMetaPromise.then(function (meta) {
       if (!meta || (!meta.name && !meta.original_name)) return resolve([]);
 
       var queries = [];
@@ -1256,6 +1478,7 @@ function getStreams(id, type, season, episode, providerContext) {
         if (!t) return;
         t = t.trim();
         if (t && queries.indexOf(t) === -1) queries.push(t);
+        // Remove subtitle after - or :
         var clean = t.replace(/[:\-].*$/, '').trim();
         if (clean && clean !== t && queries.indexOf(clean) === -1) queries.push(clean);
       }
@@ -1313,6 +1536,7 @@ var _cachedEsDomain = null;
 
 function getEsDomain(cb) {
   if (_cachedEsDomain) return cb(_cachedEsDomain);
+  // Try cabod domain list, fallback to hardcoded
   _customFetch("https://raw.githubusercontent.com/qwertyuiop8899/streamvix/main/config/domains.json", {}, 10000)
     .then(function (r) { return r.text(); })
     .then(function (data) {
@@ -1335,6 +1559,7 @@ function getEsDomain(cb) {
           }
         }
       } catch (e) {
+        // Maybe it's a text file, try alternative format
         var lines = data.split('\n');
         for (var i = 0; i < lines.length; i++) {
           if (lines[i].indexOf('eurostreaming') >= 0) {
@@ -1362,6 +1587,7 @@ function searchSeries(domain, title, seasonNum, cb) {
   esFetch(domain + '/?s=' + encodeURIComponent(query), function (err, html) {
     if (err || !html) return cb(null);
 
+    // Helper per normalizzare i titoli (accenti, minuscole, alfanumerici)
     function normalizeTitle(t) {
       if (!t) return '';
       return t
@@ -1373,32 +1599,46 @@ function searchSeries(domain, title, seasonNum, cb) {
         .replace(/\s+/g, ' ');
     }
 
+    // Pulisce il titolo del post eliminando l'anno e diciture superflue
     function cleanPostTitle(title) {
       if (!title) return '';
       return title
-        .replace(/\(\d{4}\)/g, '')
-        .replace(/-\s*stagione\s*\d+/gi, '')
+        .replace(/\(\d{4}\)/g, '')          // Rimuove l'anno es. (2022)
+        .replace(/-\s*stagione\s*\d+/gi, '') // Rimuove il suffisso stagione
         .replace(/streaming/gi, '')
         .replace(/serie\s*tv/gi, '')
         .trim();
     }
 
+    // Assegna un punteggio di accuratezza da 0 a 100
     function scoreTitleMatch(target, candidate) {
       var normTarget = normalizeTitle(target);
       var normCandidate = normalizeTitle(cleanPostTitle(candidate));
+      
+      // Match perfetto
       if (normTarget === normCandidate) return 100;
+      
       var targetTokens = normTarget.split(' ').filter(Boolean);
       var candidateTokens = normCandidate.split(' ').filter(Boolean);
+      
       if (targetTokens.length === 0 || candidateTokens.length === 0) return 0;
+      
+      // Conta quanti token del titolo cercato sono presenti nel candidato
       var matchCount = 0;
       targetTokens.forEach(function(tok) {
         if (candidateTokens.indexOf(tok) >= 0) matchCount++;
       });
+      
+      // Tutti i token cercati devono essere presenti nel titolo candidato
       var ratio = matchCount / targetTokens.length;
       if (ratio < 1.0) return 0;
+      
+      // Se il titolo cercato è una sola parola (es. "from"), sii molto rigido:
+      // il candidato non deve contenere altre parole significative (es. "agent", "above")
       if (targetTokens.length === 1) {
         if (candidateTokens.indexOf(targetTokens[0]) >= 0) return 80;
       }
+      
       var lenDiff = Math.abs(candidateTokens.length - targetTokens.length);
       return 90 - lenDiff;
     }
@@ -1434,18 +1674,25 @@ function searchSeries(domain, title, seasonNum, cb) {
       }
     }
 
+    // Ordina i candidati per punteggio decrescente
     candidates.sort(function(a, b) { return b.score - a.score; });
+    
+    // Sceglie il migliore solo se supera la soglia di confidenza (es. 50)
     var best = (candidates.length > 0 && candidates[0].score >= 50) ? candidates[0].href : null;
     cb(best);
   });
 }
 
+// =========================================================================
+// extractLinksFromPage - Python es.py approach (regex entire HTML)
+// =========================================================================
 function extractLinksFromPage(domain, pageUrl, seasonNum, episodeNum, cb) {
   esFetch(pageUrl, function (err, html) {
     if (err || !html) return cb(null);
     var streams = [];
     var seen = {};
 
+    // Match episode line: "1×01" / "1&#215;01" / "S01E01" (like Python es.py)
     var ep2 = episodeNum < 10 ? '0' + String(episodeNum) : String(episodeNum);
     var patterns = [
       seasonNum + '\\s*(?:&#215;|×|x)\\s*0?' + episodeNum + '[\\s\\S]{0,8000}?(?=<br\\s*/?>|</div>)',
@@ -1458,6 +1705,7 @@ function extractLinksFromPage(domain, pageUrl, seasonNum, episodeNum, cb) {
     }
     if (!block) block = html;
 
+    // Extract clicka.cc URLs from the matched region
     var clickaTasks = [];
     var clickaRe = /https?:\/\/clicka\.cc\/(?:a?(tv|mix|delta))\/[A-Za-z0-9]+/gi;
     var cm;
@@ -1467,19 +1715,21 @@ function extractLinksFromPage(domain, pageUrl, seasonNum, episodeNum, cb) {
 
     if (clickaTasks.length === 0) return cb(streams.length > 0 ? streams : null);
 
+    // Resolve clicka.cc URLs in parallel with an overall scraper timeout of 14s
     var resolved = false;
     var timer = setTimeout(function () {
       if (!resolved) {
         resolved = true;
         cb(streams.length > 0 ? streams : null);
       }
-    }, 25000);
+    }, 14000);
 
     var pending = clickaTasks.length;
     clickaTasks.forEach(function (task) {
       var taskJar = {};
       var timeoutPromise = new Promise(function (_, reject) {
-        setTimeout(function () { reject(new Error('Timeout resolving link')); }, 15000);
+        // Individual link timeout
+        setTimeout(function () { reject(new Error('Timeout resolving link')); }, 12000);
       });
       Promise.race([
         resolveClickacc(task.url, task.kind, taskJar),
@@ -1512,7 +1762,4 @@ if (typeof global !== 'undefined') {
 }
 if (typeof globalThis !== 'undefined') {
   globalThis.getStreams = getStreams;
-}
-if (typeof window !== 'undefined') {
-  window.getStreams = getStreams;
 }
