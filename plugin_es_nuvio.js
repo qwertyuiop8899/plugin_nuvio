@@ -116,7 +116,6 @@ function _customFetch(url, options, timeoutMs) {
     timeoutPromise
   ]);
 }
-
 var MD_HOSTS = [
   'mixdrop.vip', 'mixdrop.ps', 'mixdrop.ch', 'mixdrop.to', 'mixdrop.club',
   'mixdrop.is', 'mixdrop.sb', 'mixdrop.co', 'mixdrop.ag', 'mixdrop.net',
@@ -143,621 +142,662 @@ function _isDigit(s) { return /^\d+$/.test(s); }
 // =========================================================================
 // COOKIE JAR
 // =========================================================================
-function _jarGet(url, jar) {
-  if (!jar) return '';
-  var hostname = _getUrlHostname(url);
-  var cookies = jar[hostname];
-  if (!cookies) return '';
-  var parts = [];
-  for (var name in cookies) {
-    parts.push(name + '=' + cookies[name]);
-  }
-  return parts.join('; ');
-}
+var _cookieJar = {};
 
 function _jarSet(url, setCookieHeader, jar) {
-  if (!jar || !setCookieHeader) return;
-  var hostname = _getUrlHostname(url);
-  if (!jar[hostname]) jar[hostname] = {};
-  var list = Array.isArray(setCookieHeader) ? setCookieHeader : [setCookieHeader];
-  for (var i = 0; i < list.length; i++) {
-    var raw = list[i].split(';')[0];
-    var eqIdx = raw.indexOf('=');
-    if (eqIdx > 0) {
-      var k = raw.substring(0, eqIdx).trim();
-      var v = raw.substring(eqIdx + 1).trim();
-      jar[hostname][k] = v;
+  if (!setCookieHeader) return;
+  var parts = setCookieHeader.split(';');
+  var first = parts[0].split('=');
+  var name = first[0].trim();
+  var value = first.slice(1).join('=').trim();
+  if (!name) return;
+  var domain = null;
+  for (var i = 1; i < parts.length; i++) {
+    var p = parts[i].trim().split('=');
+    if (p[0].toLowerCase().trim() === 'domain' && p[1]) {
+      domain = p[1].trim().toLowerCase();
+      if (domain.charAt(0) === '.') domain = domain.substring(1);
     }
   }
+  if (!domain) { domain = _getUrlHostname(url); if (!domain) return; }
+  var activeJar = jar || _cookieJar;
+  if (!activeJar[domain]) activeJar[domain] = {};
+  activeJar[domain][name] = value;
 }
 
-// =========================================================================
-// EMBEDDED PURE JS BITMAP CAPTCHA OCR (for clicka.cc)
-// =========================================================================
-function _solveCaptchaBmp(bmpBuffer) {
+function _jarGet(url, jar) {
   try {
-    if (!bmpBuffer || bmpBuffer.length < 54) return null;
-    var dataOffset = bmpBuffer[10] | (bmpBuffer[11] << 8) | (bmpBuffer[12] << 16) | (bmpBuffer[13] << 24);
-    var width = bmpBuffer[18] | (bmpBuffer[19] << 8) | (bmpBuffer[20] << 16) | (bmpBuffer[21] << 24);
-    var height = bmpBuffer[22] | (bmpBuffer[23] << 8) | (bmpBuffer[24] << 16) | (bmpBuffer[25] << 24);
-    var bpp = bmpBuffer[28] | (bmpBuffer[29] << 8);
-
-    if (bpp !== 24 && bpp !== 32) return null;
-    var bytesPerPixel = bpp / 8;
-    var rowSize = Math.floor((bpp * width + 31) / 32) * 4;
-    var isTopDown = height < 0;
-    var absHeight = Math.abs(height);
-
-    var grid = [];
-    for (var y = 0; y < absHeight; y++) {
-      grid.push(new Uint8Array(width));
-    }
-
-    for (var r = 0; r < absHeight; r++) {
-      var sourceRow = isTopDown ? r : (absHeight - 1 - r);
-      var rowStart = dataOffset + r * rowSize;
-      for (var c = 0; c < width; c++) {
-        var p = rowStart + c * bytesPerPixel;
-        var blue = bmpBuffer[p];
-        var green = bmpBuffer[p + 1];
-        var red = bmpBuffer[p + 2];
-        var isDark = (red < 120 && green < 120 && blue < 120);
-        grid[sourceRow][c] = isDark ? 1 : 0;
-      }
-    }
-
-    var colCounts = new Int32Array(width);
-    for (var c = 0; c < width; c++) {
-      var cnt = 0;
-      for (var r = 0; r < absHeight; r++) {
-        if (grid[r][c]) cnt++;
-      }
-      colCounts[c] = cnt;
-    }
-
-    var segments = [];
-    var inDigit = false;
-    var startCol = 0;
-    for (var c = 0; c < width; c++) {
-      if (colCounts[c] > 1) {
-        if (!inDigit) { inDigit = true; startCol = c; }
-      } else {
-        if (inDigit) {
-          inDigit = false;
-          if (c - startCol >= 5) segments.push({ start: startCol, end: c });
+    var host = _getUrlHostname(url); if (!host) return "";
+    var parts = host.split('.');
+    var cookies = [];
+    var activeJar = jar || _cookieJar;
+    for (var i = 0; i < parts.length; i++) {
+      var dom = parts.slice(i).join('.');
+      if (activeJar[dom]) {
+        for (var name in activeJar[dom]) {
+          cookies.push(name + '=' + activeJar[dom][name]);
         }
       }
     }
-    if (inDigit && width - startCol >= 5) segments.push({ start: startCol, end: width });
-
-    if (segments.length > 6) {
-      segments.sort(function (a, b) { return (b.end - b.start) - (a.end - a.start); });
-      segments = segments.slice(0, 6);
-      segments.sort(function (a, b) { return a.start - b.start; });
-    }
-
-    var result = '';
-    for (var i = 0; i < segments.length; i++) {
-      var seg = segments[i];
-      var digit = _recognizeDigit(grid, absHeight, seg.start, seg.end);
-      if (digit !== null) result += digit;
-    }
-
-    return result.length >= 4 ? result : null;
-  } catch (e) {
-    return null;
-  }
+    return cookies.join('; ');
+  } catch (e) { return ''; }
 }
 
-var _DIGIT_MODELS = (function () {
-  var data = {};
-  data[0] = { w: 10, pixels: [[0, 0, 1, 1, 1, 1, 1, 1, 0, 0], [0, 1, 1, 0, 0, 0, 0, 1, 1, 0], [1, 1, 0, 0, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 0, 0, 1, 1], [0, 1, 1, 0, 0, 0, 0, 1, 1, 0], [0, 0, 1, 1, 1, 1, 1, 1, 0, 0]] };
-  data[1] = { w: 6, pixels: [[0, 0, 1, 1, 0, 0], [0, 1, 1, 1, 0, 0], [1, 1, 1, 1, 0, 0], [0, 0, 1, 1, 0, 0], [0, 0, 1, 1, 0, 0], [0, 0, 1, 1, 0, 0], [0, 0, 1, 1, 0, 0], [0, 0, 1, 1, 0, 0], [0, 0, 1, 1, 0, 0], [0, 0, 1, 1, 0, 0], [0, 0, 1, 1, 0, 0], [1, 1, 1, 1, 1, 1]] };
-  data[2] = { w: 10, pixels: [[0, 1, 1, 1, 1, 1, 1, 1, 0, 0], [1, 1, 0, 0, 0, 0, 0, 1, 1, 0], [0, 0, 0, 0, 0, 0, 0, 1, 1, 0], [0, 0, 0, 0, 0, 0, 1, 1, 0, 0], [0, 0, 0, 0, 0, 1, 1, 0, 0, 0], [0, 0, 0, 0, 1, 1, 0, 0, 0, 0], [0, 0, 0, 1, 1, 0, 0, 0, 0, 0], [0, 0, 1, 1, 0, 0, 0, 0, 0, 0], [0, 1, 1, 0, 0, 0, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0, 0, 0, 0, 0], [1, 1, 1, 1, 1, 1, 1, 1, 1, 1], [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]] };
-  data[3] = { w: 10, pixels: [[0, 1, 1, 1, 1, 1, 1, 1, 0, 0], [1, 1, 0, 0, 0, 0, 0, 1, 1, 0], [0, 0, 0, 0, 0, 0, 0, 1, 1, 0], [0, 0, 0, 0, 0, 0, 1, 1, 0, 0], [0, 0, 0, 1, 1, 1, 1, 0, 0, 0], [0, 0, 0, 0, 0, 0, 1, 1, 0, 0], [0, 0, 0, 0, 0, 0, 0, 1, 1, 0], [0, 0, 0, 0, 0, 0, 0, 1, 1, 0], [0, 0, 0, 0, 0, 0, 0, 1, 1, 0], [1, 1, 0, 0, 0, 0, 0, 1, 1, 0], [0, 1, 1, 0, 0, 0, 1, 1, 0, 0], [0, 0, 1, 1, 1, 1, 1, 0, 0, 0]] };
-  data[4] = { w: 10, pixels: [[0, 0, 0, 0, 0, 1, 1, 0, 0, 0], [0, 0, 0, 0, 1, 1, 1, 0, 0, 0], [0, 0, 0, 1, 1, 1, 1, 0, 0, 0], [0, 0, 1, 1, 0, 1, 1, 0, 0, 0], [0, 1, 1, 0, 0, 1, 1, 0, 0, 0], [1, 1, 0, 0, 0, 1, 1, 0, 0, 0], [1, 1, 1, 1, 1, 1, 1, 1, 1, 0], [0, 0, 0, 0, 0, 1, 1, 0, 0, 0], [0, 0, 0, 0, 0, 1, 1, 0, 0, 0], [0, 0, 0, 0, 0, 1, 1, 0, 0, 0], [0, 0, 0, 0, 0, 1, 1, 0, 0, 0], [0, 0, 0, 0, 0, 1, 1, 0, 0, 0]] };
-  data[5] = { w: 10, pixels: [[1, 1, 1, 1, 1, 1, 1, 1, 1, 0], [1, 1, 0, 0, 0, 0, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0, 0, 0, 0, 0], [1, 1, 1, 1, 1, 1, 1, 0, 0, 0], [0, 0, 0, 0, 0, 0, 1, 1, 0, 0], [0, 0, 0, 0, 0, 0, 0, 1, 1, 0], [0, 0, 0, 0, 0, 0, 0, 1, 1, 0], [0, 0, 0, 0, 0, 0, 0, 1, 1, 0], [0, 0, 0, 0, 0, 0, 0, 1, 1, 0], [1, 1, 0, 0, 0, 0, 0, 1, 1, 0], [0, 1, 1, 0, 0, 0, 1, 1, 0, 0], [0, 0, 1, 1, 1, 1, 1, 0, 0, 0]] };
-  data[6] = { w: 10, pixels: [[0, 0, 1, 1, 1, 1, 1, 0, 0, 0], [0, 1, 1, 0, 0, 0, 0, 1, 0, 0], [1, 1, 0, 0, 0, 0, 0, 0, 0, 0], [1, 1, 0, 1, 1, 1, 1, 0, 0, 0], [1, 1, 1, 0, 0, 0, 0, 1, 1, 0], [1, 1, 0, 0, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 0, 0, 1, 1], [0, 1, 1, 0, 0, 0, 0, 1, 1, 0], [0, 0, 1, 1, 1, 1, 1, 1, 0, 0]] };
-  data[7] = { w: 10, pixels: [[1, 1, 1, 1, 1, 1, 1, 1, 1, 1], [0, 0, 0, 0, 0, 0, 0, 0, 1, 1], [0, 0, 0, 0, 0, 0, 0, 1, 1, 0], [0, 0, 0, 0, 0, 0, 1, 1, 0, 0], [0, 0, 0, 0, 0, 1, 1, 0, 0, 0], [0, 0, 0, 0, 1, 1, 0, 0, 0, 0], [0, 0, 0, 1, 1, 0, 0, 0, 0, 0], [0, 0, 0, 1, 1, 0, 0, 0, 0, 0], [0, 0, 1, 1, 0, 0, 0, 0, 0, 0], [0, 0, 1, 1, 0, 0, 0, 0, 0, 0], [0, 1, 1, 0, 0, 0, 0, 0, 0, 0], [0, 1, 1, 0, 0, 0, 0, 0, 0, 0]] };
-  data[8] = { w: 10, pixels: [[0, 0, 1, 1, 1, 1, 1, 1, 0, 0], [0, 1, 1, 0, 0, 0, 0, 1, 1, 0], [1, 1, 0, 0, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 0, 0, 1, 1], [0, 1, 1, 0, 0, 0, 0, 1, 1, 0], [0, 0, 1, 1, 1, 1, 1, 1, 0, 0], [0, 1, 1, 0, 0, 0, 0, 1, 1, 0], [1, 1, 0, 0, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 0, 0, 1, 1], [0, 1, 1, 0, 0, 0, 0, 1, 1, 0], [0, 0, 1, 1, 1, 1, 1, 1, 0, 0]] };
-  data[9] = { w: 10, pixels: [[0, 0, 1, 1, 1, 1, 1, 1, 0, 0], [0, 1, 1, 0, 0, 0, 0, 1, 1, 0], [1, 1, 0, 0, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 0, 0, 1, 1], [0, 1, 1, 0, 0, 0, 0, 1, 1, 1], [0, 0, 1, 1, 1, 1, 1, 0, 1, 1], [0, 0, 0, 0, 0, 0, 0, 0, 1, 1], [0, 0, 0, 0, 0, 0, 0, 0, 1, 1], [0, 0, 0, 0, 0, 0, 0, 1, 1, 0], [0, 1, 1, 0, 0, 0, 0, 1, 1, 0], [0, 0, 1, 1, 1, 1, 1, 0, 0, 0]] };
-  return data;
-})();
-
-function _recognizeDigit(grid, height, colStart, colEnd) {
-  var minR = height, maxR = 0;
-  for (var r = 0; r < height; r++) {
-    for (var c = colStart; c < colEnd; c++) {
-      if (grid[r][c]) {
-        if (r < minR) minR = r;
-        if (r > maxR) maxR = r;
-      }
-    }
-  }
-
-  if (minR > maxR) return null;
-  var dH = maxR - minR + 1;
-  var dW = colEnd - colStart;
-  if (dH < 8 || dW < 4) return null;
-
-  var bestDigit = null;
-  var bestScore = -1;
-
-  for (var d = 0; d <= 9; d++) {
-    var model = _DIGIT_MODELS[d];
-    var mH = model.pixels.length;
-    var mW = model.w;
-
-    var matches = 0;
-    var total = 0;
-
-    for (var my = 0; my < mH; my++) {
-      var gy = Math.floor(minR + (my / mH) * dH);
-      for (var mx = 0; mx < mW; mx++) {
-        var gx = Math.floor(colStart + (mx / mW) * dW);
-        var gVal = (gy < height && gx < grid[0].length) ? grid[gy][gx] : 0;
-        var mVal = model.pixels[my][mx];
-        if (gVal === mVal) matches++;
-        total++;
-      }
-    }
-
-    var score = matches / total;
-    if (score > bestScore) {
-      bestScore = score;
-      bestDigit = d;
-    }
-  }
-
-  return bestScore >= 0.70 ? String(bestDigit) : null;
-}
+function _jarClear() { _cookieJar = {}; }
 
 // =========================================================================
-// PURE JS PNG INFLATER & OCR
+// CLICKA.CC FETCH WRAPPERS
 // =========================================================================
-function _solveCaptchaPng(pngBuffer) {
+function _extractCookies(r, finalUrl, jar) {
   try {
-    if (!pngBuffer || pngBuffer.length < 8) return null;
-    if (pngBuffer[0] !== 0x89 || pngBuffer[1] !== 0x50 || pngBuffer[2] !== 0x4E || pngBuffer[3] !== 0x47) {
-      return null;
+    if (!r.headers) return;
+    var all = typeof r.headers.getSetCookie === 'function' ? r.headers.getSetCookie() : null;
+    if (all && all.length) {
+      for (var i = 0; i < all.length; i++) _jarSet(finalUrl, all[i], jar);
+      return;
     }
-
-    var width = 0, height = 0, bitDepth = 0, colorType = 0;
-    var idatChunks = [];
-    var offset = 8;
-
-    while (offset < pngBuffer.length) {
-      var length = (pngBuffer[offset] << 24) | (pngBuffer[offset + 1] << 16) | (pngBuffer[offset + 2] << 8) | pngBuffer[offset + 3];
-      offset += 4;
-      var type = String.fromCharCode(pngBuffer[offset], pngBuffer[offset + 1], pngBuffer[offset + 2], pngBuffer[offset + 3]);
-      offset += 4;
-
-      if (type === 'IHDR') {
-        width = (pngBuffer[offset] << 24) | (pngBuffer[offset + 1] << 16) | (pngBuffer[offset + 2] << 8) | pngBuffer[offset + 3];
-        height = (pngBuffer[offset + 4] << 24) | (pngBuffer[offset + 5] << 16) | (pngBuffer[offset + 6] << 8) | pngBuffer[offset + 7];
-        bitDepth = pngBuffer[offset + 8];
-        colorType = pngBuffer[offset + 9];
-      } else if (type === 'IDAT') {
-        idatChunks.push(pngBuffer.subarray(offset, offset + length));
-      } else if (type === 'IEND') {
-        break;
-      }
-      offset += length + 4;
+    if (typeof r.headers.forEach === 'function') {
+      r.headers.forEach(function (v, k) {
+        if (k.toLowerCase() === 'set-cookie') _jarSet(finalUrl, v, jar);
+      });
+    } else if (typeof r.headers.get === 'function') {
+      var sc = r.headers.get('set-cookie') || r.headers.get('Set-Cookie');
+      if (sc) _jarSet(finalUrl, sc, jar);
     }
-
-    if (!idatChunks.length || !width || !height) return null;
-
-    var totalLen = 0;
-    for (var i = 0; i < idatChunks.length; i++) totalLen += idatChunks[i].length;
-    var allIdat = new Uint8Array(totalLen);
-    var pos = 0;
-    for (var i = 0; i < idatChunks.length; i++) {
-      allIdat.set(idatChunks[i], pos);
-      pos += idatChunks[i].length;
-    }
-
-    var rawData = null;
-    if (typeof _unzlibSync === 'function') {
-      try { rawData = _unzlibSync(allIdat); } catch (e) { }
-    }
-    if (!rawData) return null;
-
-    var bytesPerPixel = 1;
-    if (colorType === 2) bytesPerPixel = 3;
-    else if (colorType === 6) bytesPerPixel = 4;
-    else if (colorType === 0) bytesPerPixel = 1;
-    else if (colorType === 4) bytesPerPixel = 2;
-
-    var stride = width * bytesPerPixel;
-    var grid = [];
-    for (var y = 0; y < height; y++) {
-      grid.push(new Uint8Array(width));
-    }
-
-    var defiltered = new Uint8Array(height * stride);
-    var srcPos = 0;
-    var dstPos = 0;
-
-    for (var row = 0; row < height; row++) {
-      var filterType = rawData[srcPos++];
-      var rowStart = dstPos;
-      var priorRowStart = rowStart - stride;
-
-      for (var col = 0; col < stride; col++) {
-        var x = rawData[srcPos++];
-        var a = (col >= bytesPerPixel) ? defiltered[rowStart + col - bytesPerPixel] : 0;
-        var b = (row > 0) ? defiltered[priorRowStart + col] : 0;
-        var c = (row > 0 && col >= bytesPerPixel) ? defiltered[priorRowStart + col - bytesPerPixel] : 0;
-
-        var val = 0;
-        if (filterType === 0) val = x;
-        else if (filterType === 1) val = (x + a) & 0xff;
-        else if (filterType === 2) val = (x + b) & 0xff;
-        else if (filterType === 3) val = (x + Math.floor((a + b) / 2)) & 0xff;
-        else if (filterType === 4) {
-          var p = a + b - c;
-          var pa = Math.abs(p - a);
-          var pb = Math.abs(p - b);
-          var pc = Math.abs(p - c);
-          var pr = (pa <= pb && pa <= pc) ? a : ((pb <= pc) ? b : c);
-          val = (x + pr) & 0xff;
-        }
-        defiltered[dstPos++] = val;
-      }
-
-      for (var col = 0; col < width; col++) {
-        var pIdx = rowStart + col * bytesPerPixel;
-        var isDark = false;
-        if (bytesPerPixel >= 3) {
-          var r = defiltered[pIdx];
-          var g = defiltered[pIdx + 1];
-          var b = defiltered[pIdx + 2];
-          isDark = (r < 120 && g < 120 && b < 120);
-        } else {
-          isDark = defiltered[pIdx] < 120;
-        }
-        grid[row][col] = isDark ? 1 : 0;
-      }
-    }
-
-    var colCounts = new Int32Array(width);
-    for (var c = 0; c < width; c++) {
-      var cnt = 0;
-      for (var r = 0; r < height; r++) {
-        if (grid[r][c]) cnt++;
-      }
-      colCounts[c] = cnt;
-    }
-
-    var segments = [];
-    var inDigit = false;
-    var startCol = 0;
-    for (var c = 0; c < width; c++) {
-      if (colCounts[c] > 1) {
-        if (!inDigit) { inDigit = true; startCol = c; }
-      } else {
-        if (inDigit) {
-          inDigit = false;
-          if (c - startCol >= 5) segments.push({ start: startCol, end: c });
-        }
-      }
-    }
-    if (inDigit && width - startCol >= 5) segments.push({ start: startCol, end: width });
-
-    if (segments.length > 6) {
-      segments.sort(function (a, b) { return (b.end - b.start) - (a.end - a.start); });
-      segments = segments.slice(0, 6);
-      segments.sort(function (a, b) { return a.start - b.start; });
-    }
-
-    var result = '';
-    for (var i = 0; i < segments.length; i++) {
-      var seg = segments[i];
-      var digit = _recognizeDigit(grid, height, seg.start, seg.end);
-      if (digit !== null) result += digit;
-    }
-
-    return result.length >= 4 ? result : null;
-  } catch (e) {
-    return null;
-  }
+  } catch (e) { }
 }
 
-function _parseCaptchaImage(buf) {
-  if (!buf || buf.length < 8) return null;
-  if (buf[0] === 0x42 && buf[1] === 0x4D) {
-    return _solveCaptchaBmp(buf);
-  }
-  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) {
-    return _solveCaptchaPng(buf);
-  }
-  return null;
+function _follow(url, options, maxHops, jar) {
+  return new Promise(function (resolve, reject) {
+    var hops = 0;
+    function doFetch(curUrl) {
+      if (hops++ > maxHops) return reject(new Error('Too many redirects'));
+      var fetchOpts = {};
+      for (var k in options) fetchOpts[k] = options[k];
+      var cookieStr = _jarGet(curUrl, jar);
+      if (cookieStr) {
+        fetchOpts.headers = fetchOpts.headers || {};
+        fetchOpts.headers['Cookie'] = cookieStr;
+      }
+
+      var finalFetchUrl = curUrl;
+      var isClicaDeltabit = curUrl.includes('clicka.cc/delta') || curUrl.includes('clicka.cc/adelta');
+      var isClicaTurbovid = curUrl.includes('clicka.cc/tv/') || curUrl.includes('clicka.cc/tva/');
+      var isSafego = curUrl.includes('safego.cc');
+      
+      if (isClicaDeltabit || isClicaTurbovid || isSafego) {
+        finalFetchUrl = 'https://vidclick.leanhhu061208-775.workers.dev/?url=' + encodeURIComponent(curUrl);
+        fetchOpts.headers = fetchOpts.headers || {};
+        fetchOpts.headers['User-Agent'] = ES_UA;
+        fetchOpts.headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8';
+        fetchOpts.headers['Accept-Language'] = 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7';
+        fetchOpts.headers['Sec-Ch-Ua'] = '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"';
+        fetchOpts.headers['Sec-Ch-Ua-Mobile'] = '?0';
+        fetchOpts.headers['Sec-Ch-Ua-Platform'] = '"Windows"';
+        fetchOpts.headers['Sec-Fetch-Dest'] = 'document';
+        fetchOpts.headers['Sec-Fetch-Mode'] = 'navigate';
+        fetchOpts.headers['Sec-Fetch-Site'] = 'none';
+        fetchOpts.headers['Sec-Fetch-User'] = '?1';
+        fetchOpts.headers['Upgrade-Insecure-Requests'] = '1';
+        fetchOpts.headers['Connection'] = 'keep-alive';
+      }
+
+      var fetchTimeoutMs = fetchOpts.timeout || 15000;
+      delete fetchOpts.timeout;
+      _customFetch(finalFetchUrl, Object.assign({}, fetchOpts, { redirect: 'manual' }), fetchTimeoutMs).then(function (r) {
+        var finalUrl = curUrl;
+        _extractCookies(r, finalUrl, jar);
+        if (r.status >= 300 && r.status < 400 && r.status !== 304) {
+          var loc = r.headers.get('location');
+          if (loc) {
+            var nextUrl = loc.indexOf('://') >= 0 ? loc : _resolveUrl(loc, finalUrl);
+            if (nextUrl && nextUrl !== curUrl) return doFetch(nextUrl);
+          }
+        }
+        return r.text().then(function (text) {
+          resolve({ ok: true, status: r.status, text: text, url: finalUrl });
+        });
+      }).catch(function (err) { reject(err); });
+    }
+    doFetch(url);
+  });
+}
+
+function _clickaFetch(url, referer, jar) {
+  var headers = {
+    'User-Agent': ES_UA,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Encoding': 'identity'
+  };
+  if (referer) headers['Referer'] = referer;
+  return _follow(url, { headers: headers }, 7, jar);
+}
+
+function _clickaPost(url, formData, referer, jar) {
+  var headers = {
+    'User-Agent': ES_UA,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Content-Type': 'application/x-www-form-urlencoded'
+  };
+  var _org = _getUrlOrigin(url); if (_org) headers["Origin"] = _org;
+  if (referer) headers['Referer'] = referer;
+  var body = typeof formData === 'string' ? formData : _formEncode(formData);
+  return _follow(url, { method: 'POST', headers: headers, body: body }, 7, jar);
 }
 
 function _formEncode(obj) {
   var parts = [];
   for (var k in obj) {
     if (obj.hasOwnProperty(k)) {
-      parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(obj[k]));
+      parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(String(obj[k])));
     }
   }
   return parts.join('&');
 }
 
 // =========================================================================
-// PACKER / OBFUSCATED JS UNPACKER
+// PNG DECODER
 // =========================================================================
-function unpackPackedJs(packedCode) {
-  if (!packedCode || packedCode.indexOf('eval(function(p,a,c,k,e,d)') < 0) {
-    return packedCode;
+function _pngDecode(b64) {
+  var raw = _atob(b64);
+  var len = raw.length;
+  var bytes = new Uint8Array(len);
+  for (var i = 0; i < len; i++) bytes[i] = raw.charCodeAt(i) & 0xff;
+  if (bytes[0] !== 137 || bytes[1] !== 80 || bytes[2] !== 78 || bytes[3] !== 71) {
+    throw new Error('Not a PNG');
   }
-  try {
-    var regex = /eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*[dr]\s*\)\s*\{[\s\S]*?\}\s*\(\s*'([\s\S]*?)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'([\s\S]*?)'\.split\('\|'\)/;
-    var match = packedCode.match(regex);
-    if (!match) return packedCode;
-
-    var p = match[1];
-    var a = parseInt(match[2], 10);
-    var c = parseInt(match[3], 10);
-    var k = match[4].split('|');
-
-    var e = function (c) {
-      return (c < a ? '' : e(parseInt(c / a, 10))) + ((c = c % a) > 35 ? String.fromCharCode(c + 29) : c.toString(36));
-    };
-
-    while (c--) {
-      if (k[c]) {
-        var word = e(c);
-        p = p.replace(new RegExp('\\b' + word + '\\b', 'g'), k[c]);
+  var pos = 8;
+  var width, height, bitDepth, colorType;
+  var idatData = [];
+  while (pos + 8 <= bytes.length) {
+    var clen = (bytes[pos] << 24) | (bytes[pos + 1] << 16) | (bytes[pos + 2] << 8) | bytes[pos + 3];
+    var ctype = String.fromCharCode(bytes[pos + 4]) + String.fromCharCode(bytes[pos + 5]) +
+      String.fromCharCode(bytes[pos + 6]) + String.fromCharCode(bytes[pos + 7]);
+    if (ctype === 'IHDR') {
+      width = (bytes[pos + 8] << 24) | (bytes[pos + 9] << 16) | (bytes[pos + 10] << 8) | bytes[pos + 11];
+      height = (bytes[pos + 12] << 24) | (bytes[pos + 13] << 16) | (bytes[pos + 14] << 8) | bytes[pos + 15];
+      bitDepth = bytes[pos + 16];
+      colorType = bytes[pos + 17];
+    } else if (ctype === 'IDAT') {
+      var chunkData = bytes.subarray(pos + 8, pos + 8 + clen);
+      idatData.push(chunkData);
+    } else if (ctype === 'IEND') {
+      break;
+    }
+    pos += 12 + clen;
+  }
+  if (!width || !height) throw new Error('PNG: no IHDR');
+  var bytesPerPixel = (colorType === 6) ? 4 : (colorType === 2) ? 3 : 1;
+  if (bitDepth !== 8 || (colorType !== 2 && colorType !== 6)) {
+    throw new Error('PNG: unsupported format colorType=' + colorType + ' bitDepth=' + bitDepth);
+  }
+  var totalLen = 0;
+  for (var di = 0; di < idatData.length; di++) totalLen += idatData[di].length;
+  var idatCombined = new Uint8Array(totalLen);
+  var off = 0;
+  for (var di2 = 0; di2 < idatData.length; di2++) {
+    idatCombined.set(idatData[di2], off);
+    off += idatData[di2].length;
+  }
+  var decompressed = (typeof _unzlibSync !== 'undefined' ? _unzlibSync : globalThis._unzlibSync)(idatCombined);
+  var bpp = bytesPerPixel;
+  var rowBytes = width * bpp;
+  var pixels = new Array(height);
+  var dpos = 0;
+  for (var y = 0; y < height; y++) {
+    var filter = decompressed[dpos++];
+    var row = new Uint8Array(rowBytes);
+    var prevRow = y > 0 ? pixels[y - 1] : null;
+    for (var x = 0; x < rowBytes; x++) {
+      var rawByte = decompressed[dpos++];
+      if (filter === 0) {
+        row[x] = rawByte;
+      } else if (filter === 1) {
+        var left = x >= bpp ? row[x - bpp] : 0;
+        row[x] = (rawByte + left) & 0xff;
+      } else if (filter === 2) {
+        var up = prevRow ? prevRow[x] : 0;
+        row[x] = (rawByte + up) & 0xff;
+      } else if (filter === 3) {
+        var leftA = x >= bpp ? row[x - bpp] : 0;
+        var upA = prevRow ? prevRow[x] : 0;
+        row[x] = (rawByte + Math.floor((leftA + upA) / 2)) & 0xff;
+      } else if (filter === 4) {
+        var leftP = x >= bpp ? row[x - bpp] : 0;
+        var upP = prevRow ? prevRow[x] : 0;
+        var upLeftP = (x >= bpp && prevRow) ? prevRow[x - bpp] : 0;
+        var p = leftP + upP - upLeftP;
+        var pa = Math.abs(p - leftP);
+        var pb = Math.abs(p - upP);
+        var pc = Math.abs(p - upLeftP);
+        var pr = (pa <= pb && pa <= pc) ? leftP : (pb <= pc ? upP : upLeftP);
+        row[x] = (rawByte + pr) & 0xff;
       }
     }
-    return p;
-  } catch (err) {
-    return packedCode;
+    pixels[y] = row;
   }
+  return { width: width, height: height, pixels: pixels, bpp: bpp };
 }
 
-function _findStreamSource(html) {
-  var m3u8Match = html.match(/(https?:\/\/[^"'\s<>]+\.m3u8[^"'\s<>]*)/i);
-  if (m3u8Match) return m3u8Match[1];
-  var fileMatch = html.match(/(?:file|source|src)\s*:\s*["']([^"']+\.mp4[^"']*)["']/i);
-  if (fileMatch) return fileMatch[1];
-  var mp4Match = html.match(/(https?:\/\/[^"'\s<>]+\.mp4[^"'\s<>]*)/i);
-  if (mp4Match) return mp4Match[1];
+// =========================================================================
+// CAPTCHA OCR - 10x10 template matching
+// =========================================================================
+var DIGIT_PIXELS = [
+  { w: 8, pixels: [[0, 0, 0, 1, 1, 0, 0, 0], [0, 0, 1, 1, 1, 1, 0, 0], [0, 1, 1, 0, 0, 1, 1, 0], [1, 1, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 1, 1], [0, 1, 1, 0, 0, 1, 1, 0], [0, 0, 1, 1, 1, 1, 0, 0], [0, 0, 0, 1, 1, 0, 0, 0]] },
+  { w: 3, pixels: [[0, 1, 1], [1, 1, 1], [1, 1, 1], [0, 1, 1], [0, 1, 1], [0, 1, 1], [0, 1, 1], [0, 1, 1], [0, 1, 1], [1, 1, 1]] },
+  { w: 7, pixels: [[0, 1, 1, 1, 1, 0, 0], [1, 1, 0, 0, 1, 1, 0], [1, 0, 0, 0, 0, 1, 1], [0, 0, 0, 0, 0, 1, 1], [0, 0, 0, 0, 1, 1, 0], [0, 0, 0, 1, 1, 0, 0], [0, 0, 1, 1, 0, 0, 0], [0, 1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0, 0], [1, 1, 1, 1, 1, 1, 1]] },
+  { w: 5, pixels: [[1, 1, 1, 0, 0], [0, 0, 1, 1, 0], [0, 0, 0, 1, 1], [0, 0, 1, 1, 0], [1, 1, 1, 0, 0], [0, 0, 1, 1, 0], [0, 0, 0, 1, 1], [0, 0, 0, 1, 1], [0, 0, 1, 1, 0], [1, 1, 1, 0, 0]] },
+  { w: 6, pixels: [[0, 0, 0, 0, 1, 1], [0, 0, 0, 1, 1, 1], [0, 0, 1, 1, 1, 1], [0, 1, 1, 0, 1, 1], [1, 1, 0, 0, 1, 1], [1, 0, 0, 0, 1, 1], [1, 1, 1, 1, 1, 1], [0, 0, 0, 0, 1, 1], [0, 0, 0, 0, 1, 1], [0, 0, 0, 0, 1, 1]] },
+  { w: 8, pixels: [[1, 1, 1, 1, 1, 1, 1, 0], [1, 1, 0, 0, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0, 0, 0], [1, 1, 0, 1, 1, 1, 0, 0], [1, 1, 1, 0, 0, 1, 1, 0], [0, 0, 0, 0, 0, 0, 1, 1], [0, 0, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 1, 1], [0, 1, 1, 0, 0, 1, 1, 0], [0, 0, 1, 1, 1, 1, 0, 0]] },
+  { w: 7, pixels: [[0, 0, 1, 1, 1, 1, 0], [0, 1, 1, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 1], [1, 1, 0, 0, 0, 0, 0], [1, 1, 0, 1, 1, 1, 0], [1, 1, 1, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 1], [1, 1, 0, 0, 0, 0, 1], [0, 1, 1, 0, 0, 1, 1], [0, 0, 1, 1, 1, 1, 0]] },
+  { w: 8, pixels: [[1, 1, 1, 1, 1, 1, 1, 1], [0, 0, 0, 0, 0, 0, 1, 1], [0, 0, 0, 0, 0, 0, 1, 1], [0, 0, 0, 0, 0, 1, 1, 0], [0, 0, 0, 0, 1, 1, 0, 0], [0, 0, 0, 1, 1, 0, 0, 0], [0, 0, 1, 1, 0, 0, 0, 0], [0, 1, 1, 0, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0, 0, 0]] },
+  { w: 8, pixels: [[0, 0, 1, 1, 1, 1, 0, 0], [0, 1, 1, 0, 0, 1, 1, 0], [1, 1, 0, 0, 0, 0, 1, 1], [0, 1, 1, 0, 0, 1, 1, 0], [0, 0, 1, 1, 1, 1, 0, 0], [0, 1, 1, 0, 0, 1, 1, 0], [1, 1, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 0, 0, 1, 1], [0, 1, 1, 0, 0, 1, 1, 0], [0, 0, 1, 1, 1, 1, 0, 0]] },
+  { w: 7, pixels: [[0, 1, 1, 1, 1, 0, 0], [1, 1, 0, 0, 1, 1, 0], [1, 0, 0, 0, 0, 1, 1], [1, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 1, 1, 1], [0, 1, 1, 1, 0, 1, 1], [0, 0, 0, 0, 0, 1, 1], [1, 0, 0, 0, 0, 1, 1], [1, 1, 0, 0, 1, 1, 0], [0, 1, 1, 1, 1, 0, 0]] }
+];
+
+function _binarize(pixels, w, h, bpp) {
+  var bin = new Array(h);
+  for (var y = 0; y < h; y++) {
+    bin[y] = new Uint8Array(w);
+    for (var x = 0; x < w; x++) {
+      var idx = x * bpp;
+      var r = pixels[y][idx];
+      var g = pixels[y][idx + 1];
+      var b = pixels[y][idx + 2];
+      var mx = Math.max(r, g, b);
+      var mn = Math.min(r, g, b);
+      bin[y][x] = (r < 110 && g < 110 && b < 170 && (mx - mn) < 80) ? 1 : 0;
+    }
+  }
+  return bin;
+}
+
+function _segmentChars(bin, w, h) {
+  var proj = new Array(w);
+  for (var x = 0; x < w; x++) {
+    var count = 0;
+    for (var y = 0; y < h; y++) {
+      if (bin[y][x]) count++;
+    }
+    proj[x] = count;
+  }
+  var threshold = Math.round(h * 0.1);
+  var segments = [];
+  var inChar = false;
+  var start = 0;
+  for (var x2 = 0; x2 < w; x2++) {
+    if (proj[x2] >= threshold) {
+      if (!inChar) {
+        start = x2;
+        inChar = true;
+      }
+    } else {
+      if (inChar) {
+        if (x2 - start >= 2) segments.push({ x1: start, x2: x2 - 1 });
+        inChar = false;
+      }
+    }
+  }
+  if (inChar && w - start >= 2) segments.push({ x1: start, x2: w - 1 });
+  var refined = [];
+  for (var si = 0; si < segments.length; si++) {
+    var seg = segments[si];
+    var segW = seg.x2 - seg.x1 + 1;
+    if (segW >= 2 && segW <= w * 0.5) refined.push(seg);
+  }
+  return refined;
+}
+
+function _extractSegment(bin, seg, w, h) {
+  var segW = seg.x2 - seg.x1 + 1;
+  var data = new Array(h);
+  for (var y = 0; y < h; y++) {
+    data[y] = new Uint8Array(segW);
+    for (var x = 0; x < segW; x++) {
+      data[y][x] = bin[y][seg.x1 + x];
+    }
+  }
+  return { data: data, w: segW, h: h };
+}
+
+function _cropSegVert(segData, segW, segH) {
+  var y1 = segH, y2 = 0;
+  for (var y = 0; y < segH; y++) {
+    for (var x = 0; x < segW; x++) {
+      if (segData[y][x]) { if (y < y1) y1 = y; if (y > y2) y2 = y; break; }
+    }
+  }
+  if (y2 < y1) return null;
+  var cropH = y2 - y1 + 1;
+  var cropped = new Array(cropH);
+  for (var y = y1; y <= y2; y++) {
+    cropped[y - y1] = new Uint8Array(segW);
+    for (var x = 0; x < segW; x++) cropped[y - y1][x] = segData[y][x];
+  }
+  return { data: cropped, w: segW, h: cropH };
+}
+
+function _digitMatchScore(segData, segW, segH, template) {
+  var tw = template.w;
+  var th = 10;
+  if (segH !== th) return 0;
+  var sw = segW < tw ? segW : tw;
+  var lw = segW < tw ? tw : segW;
+  var shortData = segW < tw ? segData : template.pixels;
+  var longData = segW < tw ? template.pixels : segData;
+  var maxScore = 0;
+  for (var off = 0; off <= lw - sw; off++) {
+    var matches = 0;
+    for (var y = 0; y < th; y++) {
+      for (var x = 0; x < sw; x++) {
+        if (shortData[y][x] === longData[y][off + x]) matches++;
+      }
+    }
+    var score = matches / (sw * th);
+    if (score > maxScore) maxScore = score;
+  }
+  return maxScore;
+}
+
+function _classifyDigit(segData, segW, segH) {
+  if (segH <= 0) return -1;
+  var cropped = _cropSegVert(segData, segW, segH);
+  if (!cropped || cropped.h < 8) return -1;
+  var cw = cropped.w, ch = cropped.h;
+  var bestScore = 0;
+  var bestDigit = -1;
+  for (var d = 0; d < 10; d++) {
+    var tmpl = DIGIT_PIXELS[d];
+    if (Math.abs(cw - tmpl.w) > 2) continue;
+    var score = _digitMatchScore(cropped.data, cw, ch, tmpl);
+    if (score > bestScore) {
+      bestScore = score;
+      bestDigit = d;
+    }
+  }
+  if (bestScore >= 0.75) return bestDigit;
+  for (var d2 = 0; d2 < 10; d2++) {
+    var tmpl2 = DIGIT_PIXELS[d2];
+    if (Math.abs(cw - tmpl2.w) > 3) continue;
+    var score2 = _digitMatchScore(cropped.data, cw, ch, tmpl2);
+    if (score2 > bestScore) {
+      bestScore = score2;
+      bestDigit = d2;
+    }
+  }
+  return bestScore >= 0.6 ? bestDigit : -1;
+}
+
+function _ocrSolve(imageB64) {
+  var decoded = _pngDecode(imageB64);
+  var bin = _binarize(decoded.pixels, decoded.width, decoded.height, decoded.bpp);
+  var segs = _segmentChars(bin, decoded.width, decoded.height);
+  if (segs.length < 3 || segs.length > 6) return null;
+  var result = '';
+  for (var si = 0; si < segs.length; si++) {
+    var seg = _extractSegment(bin, segs[si], decoded.width, decoded.height);
+    var digit = _classifyDigit(seg.data, seg.w, seg.h);
+    if (digit < 0) return null;
+    result += String(digit);
+  }
+  return result;
+}
+
+// =========================================================================
+// CAPTCHA PAGE DETECTION & EXTRACTION
+// =========================================================================
+function _hasCaptcha(text) {
+  var hasImg = /data:image\/(?:png|jpe?g);base64,/i.test(text);
+  if (!hasImg) return false;
+  if (/maxstream\.video\/uprots/i.test(text)) return false;
+  var hasForm = /<input[^>]+\bname=["']?capt(?:cha|ch5|ch6)?["']?/i.test(text);
+  return hasForm;
+}
+
+function _captchaImageSrc(text) {
+  var m = text.match(/data:image\/(?:png|jpe?g);base64,[^"]+/i);
+  return m ? m[0] : null;
+}
+
+function _formDataFromInputs(text, guess, captchaField) {
+  var data = {};
+  var inputRe = /<input\b[^>]*>/gi;
+  var m;
+  while ((m = inputRe.exec(text))) {
+    var tag = m[0];
+    var nameM = tag.match(/\bname=(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i);
+    if (!nameM) continue;
+    var name = _decodeEntities(nameM[1] || nameM[2] || nameM[3] || '');
+    var valueM = tag.match(/\bvalue=(?:"([^"]*)"|'([^']*)'|([^\s>]*))/i);
+    var value = valueM ? _decodeEntities(valueM[1] || valueM[2] || valueM[3] || '') : '';
+    var lowerName = name.toLowerCase();
+    var isCaptcha = (lowerName.indexOf('capt') === 0 || /captcha|insert\s+numbers/i.test(tag));
+    if (name && isCaptcha) {
+      data[name] = guess;
+    } else if (name) {
+      data[name] = value;
+    }
+  }
+  return data;
+}
+
+function _findCaptchaFormAction(text, baseUrl) {
+  var formMatch = text.match(/<form\b[^>]*action=(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>/i);
+  if (formMatch) {
+    var rawAction = _decodeEntities(formMatch[1] || formMatch[2] || formMatch[3] || '').trim();
+    if (rawAction && rawAction !== '#') return _resolveUrl(rawAction, baseUrl);
+  }
+  return baseUrl;
+}
+
+// =========================================================================
+// HTML URL PATTERN PARSERS
+// =========================================================================
+function _findProceedToVideoUrl(text) {
+  var m = text.match(/https?:\/\/clicka\.cc\/(?:adelta|tva|amix)\/[^"'<>\s]+/i);
+  if (m) return m[0];
+  var dm = text.match(new RegExp('https?://[^\\s"\'>]*' + MD_PAT + '[^\\s"\'>]+', 'i'));
+  if (dm) return dm[0];
+  var dt = text.match(/https?:\/\/[^\s"'>]*?deltabit\.[a-z]+\/[A-Za-z0-9]{6,}/i);
+  if (dt) return dt[0];
+  var tv = text.match(/https?:\/\/[^\s"'>]*?turbovid\.[a-z]+\/[A-Za-z0-9]{6,}/i);
+  if (tv) return tv[0];
+  var aM = text.match(/<a\b[^>]*href=["']([^"']+)["'][^>]*>[\s\S]*?Proceed\s*to\s*video/i);
+  return aM ? aM[1] : null;
+}
+
+function _findMixdropUrl(text) {
+  var re = new RegExp('https?://[^\\s"\'>]*' + MD_PAT + '[^\\s"\'>]*/(?:e|f|emb|embed)/([A-Za-z0-9]+)', 'i');
+  var m = text.match(re);
+  return m ? { url: m[0], id: m[1] } : null;
+}
+
+function _findDeltabitUrl(text) {
+  var m = text.match(/https?:\/\/(?:[a-z0-9.-]+\.)?deltabit\.[a-z]+\/([A-Za-z0-9]{6,})/i);
+  return m ? m[0] : null;
+}
+
+function _findTurbovidUrl(text) {
+  var m = text.match(/https?:\/\/(?:[a-z0-9.-]+\.)?(?:turbovid|turbovid)\.[a-z]+\/([A-Za-z0-9]{6,})/i);
+  return m ? m[0] : null;
+}
+
+function _findNextUprotUrl(text, baseUrl) {
+  var anchors = text.match(/<a\b[^>]*\bhref=(?:"([^"]+)"|'([^']+)'|([^\s>]+))[^>]*>([\s\S]*?)<\/a>/gi);
+  if (!anchors) return null;
+  for (var ai = 0; ai < anchors.length; ai++) {
+    var aTag = anchors[ai];
+    var hrefM = aTag.match(/\bhref=(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i);
+    var labelM = aTag.match(/>([\s\S]*?)<\/a>/i);
+    var href = hrefM ? (hrefM[1] || hrefM[2] || hrefM[3]) : null;
+    var label = labelM ? labelM[1].replace(/<[^>]+>/g, '').toLowerCase().trim() : '';
+    if (href && label.indexOf('continue') >= 0 && /(maxstream|clicka|uprots|adelta)/i.test(href)) {
+      var resolved = _resolveUrl(href, baseUrl);
+      if (resolved) return resolved;
+    }
+  }
+  for (var ai2 = 0; ai2 < anchors.length; ai2++) {
+    var aTag2 = anchors[ai2];
+    var hrefM2 = aTag2.match(/\bhref=(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i);
+    var labelM2 = aTag2.match(/>([\s\S]*?)<\/a>/i);
+    var href2 = hrefM2 ? (hrefM2[1] || hrefM2[2] || hrefM2[3]) : null;
+    var label2 = labelM2 ? labelM2[1].replace(/<[^>]+>/g, '').toLowerCase().trim() : '';
+    if (href2 && label2.indexOf('continue') >= 0) {
+      var resolved2 = _resolveUrl(href2, baseUrl);
+      if (resolved2) return resolved2;
+    }
+  }
   return null;
 }
 
+function _findM3u8(text) {
+  var pats = [
+    /sources:\s*\[\s*\{\s*src:\s*["']([^"']+\.m3u8[^"']*)["']/i,
+    /(?:file|src|url)\s*[:=]\s*["']([^"']+\.m3u8[^"']*)["']/i,
+    /["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i,
+    /(https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*)/i
+  ];
+  for (var pi = 0; pi < pats.length; pi++) {
+    var mm = text.match(pats[pi]);
+    if (mm && mm[1]) return mm[1].replace(/\\/g, '');
+  }
+  return null;
+}
+
+function _findStreamSource(text) {
+  var pats = [
+    /sources\s*:\s*\[\s*["']([^"']+\.(?:mp4|m3u8)[^"']*)["']/i,
+    /sources\s*:\s*\[\s*\{\s*(?:file|src|url)\s*:\s*["']([^"']+\.(?:mp4|m3u8)[^"']*)["']/i,
+    /(?:file|src|url)\s*[:=]\s*["'](https?:\/\/[^"']+\.(?:mp4|m3u8)[^"']*)["']/i,
+    /["'](https?:\/\/[^"']+\.(?:mp4|m3u8)[^"']*)["']/i
+  ];
+  for (var pi = 0; pi < pats.length; pi++) {
+    var mm = text.match(pats[pi]);
+    if (mm && mm[1]) return mm[1].replace(/\\\//g, '/').replace(/\\/g, '');
+  }
+  return null;
+}
+
+function _isDeltabitHost(url) { return /deltabit\./i.test(String(url || "")); }
+function _isTurbovidHost(url) { return /turbovid\./i.test(String(url || "")); }
+function _isMixdropHost(url) { return new RegExp(MD_PAT, "i").test(String(url || "")); }
+
 // =========================================================================
-// CAPTCHA OCR & FORM SUBMISSION
+// PACKED JS UNPACKER
 // =========================================================================
-function _resolveCaptchaAndSubmit(pageUrl, html, jar) {
+function unpackPackedJs(packed) {
+  var m = packed.match(/eval\(function\(p,a,c,k,e,d\)\{[\s\S]*?\}\(\s*'((?:\\.|[^'\\])*)'\s*,\s*(\d+|\[\])\s*,\s*(\d+)\s*,\s*'((?:\\.|[^'\\])*)'\s*\.split\(['"]\|['"]\)/);
+  if (!m) {
+    m = packed.match(/\}\(\s*'((?:\\.|[^'\\])*)'\s*,\s*(\d+|\[\])\s*,\s*(\d+)\s*,\s*'((?:\\.|[^'\\])*)'\s*\.split\(['"]\|['"]\)/);
+  }
+  if (!m) return null;
+  var p = m[1].replace(/\\'/g, "'").replace(/\\\\/g, "\\");
+  var a = m[2] === "[]" ? 62 : parseInt(m[2], 10);
+  var c = parseInt(m[3], 10);
+  var k = m[4].split("|");
+  var ALPHA = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  function toBaseN(n) {
+    if (n < a) return ALPHA[n];
+    return toBaseN(Math.floor(n / a)) + ALPHA[n % a];
+  }
+  var dict = {};
+  for (var i = 0; i < c; i++) {
+    var key = toBaseN(i);
+    dict[key] = (k[i] && k[i].length) ? k[i] : key;
+  }
+  return p.replace(/\b(\w+)\b/g, function (_, w) { return dict[w] !== undefined ? dict[w] : w; });
+}
+
+// =========================================================================
+// CLICKA.CC CAPTCHA SOLVER
+// =========================================================================
+function _solveCaptchaPage(text, currentUrl, jar) {
   return new Promise(function (resolve, reject) {
-    var imgMatch = html.match(/<img[^>]+src=["'](data:image\/[^"']+|[^"']*(?:captcha|secoder|secur)[^"']*)["']/i);
-    if (!imgMatch) return resolve(null);
-    var imgSrc = imgMatch[1];
-
-    function doSolve(buffer) {
-      var code = _parseCaptchaImage(buffer);
-      if (!code) return resolve(null);
-
-      var formMatch = html.match(/<form[^>]+action=["']([^"']*)["'][^>]*>([\s\S]*?)<\/form>/i);
-      var action = pageUrl;
-      var formHtml = html;
-      if (formMatch) {
-        action = formMatch[1] ? _resolveUrl(formMatch[1], pageUrl) : pageUrl;
-        formHtml = formMatch[2];
-      }
-
-      var formData = {};
-      var inputRe = /<input[^>]+name=["']([^"']+)["'][^>]*value=["']([^"']*)["']/gi;
-      var im;
-      var captchaFieldFound = false;
-
-      while ((im = inputRe.exec(formHtml)) !== null) {
-        var n = im[1];
-        var v = im[2];
-        var nLow = n.toLowerCase();
-        if (nLow.indexOf('captcha') >= 0 || nLow.indexOf('code') >= 0 || nLow.indexOf('sec') >= 0) {
-          v = code;
-          captchaFieldFound = true;
-        }
-        formData[n] = v;
-      }
-
-      if (!captchaFieldFound) {
-        formData['captcha'] = code;
-      }
-
-      var postHeaders = {
-        'User-Agent': ES_UA,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Origin': _getUrlOrigin(pageUrl),
-        'Referer': pageUrl
-      };
-      var cstr = _jarGet(pageUrl, jar);
-      if (cstr) postHeaders['Cookie'] = cstr;
-
-      _customFetch(action, {
-        method: 'POST',
-        headers: postHeaders,
-        body: _formEncode(formData),
-        redirect: 'manual'
-      }, 15000)
-        .then(function (r) {
-          try {
-            var sc = r.headers.get('set-cookie') || r.headers.get('Set-Cookie');
-            if (sc) _jarSet(pageUrl, sc, jar);
-          } catch (e) { }
-          if (r.status >= 300 && r.status < 400) {
-            var loc = r.headers.get('location') || r.headers.get('Location');
-            if (loc) {
-              return resolve({ redirectedUrl: _resolveUrl(loc, action) });
-            }
+    if (!_hasCaptcha(text)) return resolve({ text: text, url: currentUrl });
+    var imageSrc = _captchaImageSrc(text);
+    if (!imageSrc) return reject(new Error('captcha image not found'));
+    var b64 = imageSrc.replace(/^data:image\/(?:png|jpe?g);base64,/, '');
+    var guess = _ocrSolve(b64);
+    if (!guess || guess.length < 3 || guess.length > 6) {
+      return reject(new Error('OCR failed to solve captcha'));
+    }
+    var action = _findCaptchaFormAction(text, currentUrl);
+    var formData = _formDataFromInputs(text, guess);
+    _clickaPost(action, formData, currentUrl, jar)
+      .then(function (postRes) {
+        if (_hasCaptcha(postRes.text)) {
+          var _pv = _findProceedToVideoUrl(postRes.text);
+          if (!_pv) {
+            return reject(new Error('captcha still present after POST'));
           }
-          return r.text().then(function (txt) {
-            resolve({ html: txt, url: action });
-          });
-        })
-        .catch(function (err) { resolve(null); });
-    }
-
-    if (imgSrc.startsWith('data:image/')) {
-      var commaIdx = imgSrc.indexOf(',');
-      var b64 = imgSrc.substring(commaIdx + 1);
-      var binaryStr = _atob(b64);
-      var u8 = new Uint8Array(binaryStr.length);
-      for (var bi = 0; bi < binaryStr.length; bi++) {
-        u8[bi] = binaryStr.charCodeAt(bi);
-      }
-      doSolve(u8);
-    } else {
-      var fullImgUrl = _resolveUrl(imgSrc, pageUrl);
-      var imgHeaders = {
-        'User-Agent': ES_UA,
-        'Referer': pageUrl
-      };
-      var cstr = _jarGet(pageUrl, jar);
-      if (cstr) imgHeaders['Cookie'] = cstr;
-
-      _customFetch(fullImgUrl, { headers: imgHeaders }, 10000)
-        .then(function (r) {
-          try {
-            var sc = r.headers.get('set-cookie') || r.headers.get('Set-Cookie');
-            if (sc) _jarSet(pageUrl, sc, jar);
-          } catch (e) { }
-          return r.arrayBuffer();
-        })
-        .then(function (ab) { doSolve(new Uint8Array(ab)); })
-        .catch(function () { resolve(null); });
-    }
+        }
+        resolve({ text: postRes.text, url: action });
+      })
+      .catch(function (err) { reject(err); });
   });
 }
 
 // =========================================================================
-// CLICKA.CC RESOLVER
+// MIXDROP EXTRACTION
 // =========================================================================
-function resolveClickacc(clickaUrl, kind, jar) {
-  var maxRedirects = 10;
-  var currentUrl = clickaUrl;
-  var referer = 'https://eurostreamings.live/';
-
-  function next() {
-    if (maxRedirects-- <= 0) return Promise.reject(new Error('Clickacc: too many redirects'));
-
+function fetchMixDrop(host, id) {
+  return new Promise(function (resolve, reject) {
     var headers = {
       'User-Agent': ES_UA,
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
-      'Referer': referer
+      'Accept-Encoding': 'identity',
+      'Referer': 'https://' + host + '/'
     };
-    var cookieStr = _jarGet(currentUrl, jar);
-    if (cookieStr) headers['Cookie'] = cookieStr;
-
-    return _customFetch(currentUrl, { headers: headers, redirect: 'manual' }, 15000)
-      .then(function (r) {
-        try {
-          var sc = r.headers.get('set-cookie') || r.headers.get('Set-Cookie');
-          if (sc) _jarSet(currentUrl, sc, jar);
-        } catch (e) { }
-
-        if (r.status >= 300 && r.status < 400) {
-          var loc = r.headers.get('location') || r.headers.get('Location');
-          if (!loc) return Promise.reject(new Error('Clickacc: redirect without Location'));
-          var nextUrl = _resolveUrl(loc, currentUrl);
-          referer = currentUrl;
-          currentUrl = nextUrl;
-
-          var destHostname = _getUrlHostname(nextUrl);
-          if (destHostname.indexOf('clicka.cc') >= 0 || destHostname.indexOf('safego.cc') >= 0) {
-            return next();
-          }
-
-          if (destHostname.indexOf('turbovid') >= 0) {
-            return extractTurbovid(nextUrl, jar).then(function (res) {
-              return { url: res.url, name: 'Eurostreaming - Turbovid', title: 'Turbovid [ITA]', quality: '1080p', headers: res.headers };
-            });
-          }
-          if (destHostname.indexOf('deltabit') >= 0) {
-            return extractDeltabit(nextUrl, jar).then(function (res) {
-              return { url: res.url, name: 'Eurostreaming - DeltaBit', title: 'DeltaBit [ITA]', quality: '1080p', headers: res.headers };
-            });
-          }
-          if (destHostname.indexOf('mixdrop') >= 0) {
-            return extractMixdrop(nextUrl);
-          }
-          return { url: nextUrl, name: 'Eurostreaming - Direct', title: 'Direct', quality: 'HD' };
+    var url = 'https://' + host + '/e/' + id;
+    _customFetch(url, { headers: headers }, 15000)
+      .then(function (r) { return r.text(); })
+      .then(function (html) {
+        var combined = html;
+        var packerRe = /eval\(function\(p,a,c,k,e,d\)[\s\S]*?\}\([\s\S]*?\.split\(['"]\|['"]\)[\s\S]*?\)\s*\)/g;
+        var pm;
+        while ((pm = packerRe.exec(html)) !== null) {
+          var unpacked = unpackPackedJs(pm[0]);
+          if (unpacked) combined += '\n' + unpacked;
         }
-
-        return r.text().then(function (html) {
-          var intermediateMatch = html.match(/https?:\/\/(?:www\.)?safego\.cc\/[A-Za-z0-9]+/i);
-          if (intermediateMatch && intermediateMatch[0] !== currentUrl) {
-            referer = currentUrl;
-            currentUrl = intermediateMatch[0];
-            return next();
-          }
-
-          var turbovidMatch = html.match(/https?:\/\/[a-z0-9_\-.]*turbovid[a-z0-9_\-.]*\/[a-zA-Z0-9_\-]+/i);
-          if (turbovidMatch) {
-            return extractTurbovid(turbovidMatch[0], jar).then(function (res) {
-              return { url: res.url, name: 'Eurostreaming - Turbovid', title: 'Turbovid [ITA]', quality: '1080p', headers: res.headers };
-            });
-          }
-
-          var deltabitMatch = html.match(/https?:\/\/[a-z0-9_\-.]*deltabit[a-z0-9_\-.]*\/[a-zA-Z0-9_\-]+/i);
-          if (deltabitMatch) {
-            return extractDeltabit(deltabitMatch[0], jar).then(function (res) {
-              return { url: res.url, name: 'Eurostreaming - DeltaBit', title: 'DeltaBit [ITA]', quality: '1080p', headers: res.headers };
-            });
-          }
-
-          var mixdropMatch = html.match(/https?:\/\/[a-z0-9_\-.]*mixdrop[a-z0-9_\-.]*\/[a-zA-Z0-9_\-]+/i);
-          if (mixdropMatch) {
-            return extractMixdrop(mixdropMatch[0]);
-          }
-
-          return _resolveCaptchaAndSubmit(currentUrl, html, jar).then(function (captchaResult) {
-            if (!captchaResult) return Promise.reject(new Error('Clickacc: captcha resolution failed'));
-            if (captchaResult.redirectedUrl) {
-              referer = currentUrl;
-              currentUrl = captchaResult.redirectedUrl;
-              return next();
+        var streamUrl = _findStreamSource(combined);
+        if (!streamUrl) {
+          var mdPats = [
+            /(?:MDCore|vsConfig)\.wurl\s*=\s*["']([^"']+)["']/,
+            /wurl\s*[:=]\s*["']([^"']+)["']/,
+            /<source\s+[^>]*src=["']([^"']+)["']/i,
+            /file\s*:\s*["']([^"']+\.(?:mp4|m3u8)[^"']*)["']/
+          ];
+          for (var pi = 0; pi < mdPats.length; pi++) {
+            var mm = combined.match(mdPats[pi]);
+            if (mm && mm[1]) {
+              streamUrl = mm[1].trim();
+              if (streamUrl.indexOf('//') === 0) streamUrl = 'https:' + streamUrl;
+              break;
             }
-            if (captchaResult.html) {
-              var tMatch = captchaResult.html.match(/https?:\/\/[a-z0-9_\-.]*turbovid[a-z0-9_\-.]*\/[a-zA-Z0-9_\-]+/i);
-              if (tMatch) {
-                return extractTurbovid(tMatch[0], jar).then(function (res) {
-                  return { url: res.url, name: 'Eurostreaming - Turbovid', title: 'Turbovid [ITA]', quality: '1080p', headers: res.headers };
-                });
-              }
-              var dMatch = captchaResult.html.match(/https?:\/\/[a-z0-9_\-.]*deltabit[a-z0-9_\-.]*\/[a-zA-Z0-9_\-]+/i);
-              if (dMatch) {
-                return extractDeltabit(dMatch[0], jar).then(function (res) {
-                  return { url: res.url, name: 'Eurostreaming - DeltaBit', title: 'DeltaBit [ITA]', quality: '1080p', headers: res.headers };
-                });
-              }
-            }
-            return Promise.reject(new Error('Clickacc: unhandled page structure'));
-          });
-        });
-      });
-  }
-
-  var curHostname = _getUrlHostname(clickaUrl);
-  if (curHostname.indexOf('clicka.cc') >= 0 || curHostname.indexOf('safego.cc') >= 0) {
-    return _customFetch(clickaUrl, { headers: { 'User-Agent': ES_UA, 'Referer': referer }, redirect: 'manual' }, 10000).then(function (firstRes) {
-      try {
-        var sc = firstRes.headers.get('set-cookie') || firstRes.headers.get('Set-Cookie');
-        if (sc) _jarSet(clickaUrl, sc, jar);
-      } catch (e) { }
-      if (firstRes.status >= 300 && firstRes.status < 400) {
-        var loc = firstRes.headers.get('location') || firstRes.headers.get('Location');
-        if (loc) {
-          referer = clickaUrl;
-          currentUrl = _resolveUrl(loc, clickaUrl);
+          }
         }
-      }
+        if (!streamUrl) return reject(new Error('MixDrop stream URL not found for ' + host + '/' + id));
+        resolve(streamUrl);
+      })
+      .catch(function (err) { reject(err); });
+  });
+}
+
+function tryMixDropHosts(id) {
+  var idx = 0;
+  var lastErr = null;
+  function next() {
+    if (idx >= MD_HOSTS.length) {
+      return Promise.reject(new Error('MixDrop all hosts failed: ' + (lastErr || 'unknown')));
+    }
+    var host = MD_HOSTS[idx++];
+    return fetchMixDrop(host, id).then(function (streamUrl) {
+      return { url: streamUrl, host: host };
+    }).catch(function (err) {
+      lastErr = err.message;
       return next();
     });
   }
@@ -792,7 +832,6 @@ function extractTurbovid(pageUrl, jar) {
         var finalOrigin = _getUrlOrigin(pageUrl);
         var source = _findStreamSource(html);
         if (source) return resolve({ url: source, headers: { 'User-Agent': landingHeaders['User-Agent'], 'Referer': pageUrl, 'Origin': finalOrigin } });
-
         var formData = {};
         var ir = /<input\b[^>]*>/gi;
         var im;
@@ -818,7 +857,6 @@ function extractTurbovid(pageUrl, jar) {
         };
         var cookieStr2 = _jarGet(pageUrl, jar);
         if (cookieStr2) postHeaders['Cookie'] = cookieStr2;
-
         return _sleep(5000).then(function () {
           return _customFetch(pageUrl, { method: "POST", headers: postHeaders, body: _formEncode(formData), redirect: "manual" }, 30000);
         });
@@ -899,7 +937,6 @@ function extractDeltabit(pageUrl, jar) {
         var finalOrigin = _getUrlOrigin(pageUrl);
         var source = _findStreamSource(html);
         if (source) return resolve({ url: source, headers: { 'User-Agent': landingHeaders['User-Agent'], 'Referer': pageUrl, 'Origin': finalOrigin } });
-
         var formData = {};
         var ir = /<input\b[^>]*>/gi;
         var im;
@@ -925,9 +962,8 @@ function extractDeltabit(pageUrl, jar) {
         };
         var cookieStr2 = _jarGet(pageUrl, jar);
         if (cookieStr2) postHeaders['Cookie'] = cookieStr2;
-
         return _sleep(2500).then(function () {
-          return _customFetch(pageUrl, { method: "POST", headers: postHeaders, body: _formEncode(formData), redirect: "manual" }, 30000);
+          return _customFetch(pageUrl, { method: "POST", headers: postHeaders, body: _formEncode(formData) }, 30000);
         });
       })
       .then(function (r) {
@@ -948,9 +984,7 @@ function extractDeltabit(pageUrl, jar) {
           var pm;
           while ((pm = packerRe.exec(html)) !== null) {
             var unpacked = unpackPackedJs(pm[0]);
-            if (unpacked) {
-              combined += '\n' + unpacked;
-            }
+            if (unpacked) combined += '\n' + unpacked;
           }
           source = _findStreamSource(combined);
         }
@@ -962,70 +996,162 @@ function extractDeltabit(pageUrl, jar) {
 }
 
 // =========================================================================
-// MIXDROP EXTRACTION
+// FOLLOW REDIRECTOR PAGE
 // =========================================================================
-function extractMixdrop(embedUrl) {
-  var normalizedUrl = embedUrl.replace('/f/', '/e/');
-  var origin = _getUrlOrigin(normalizedUrl);
-  var headers = {
-    'User-Agent': ES_UA,
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.8,it;q=0.7',
-    'Referer': normalizedUrl
-  };
-
-  return _customFetch(normalizedUrl, { headers: headers }, 15000)
-    .then(function (r) { return r.text(); })
-    .then(function (html) {
-      var source = null;
-      var packedRe = /eval\(function\(p,a,c,k,e,d\)[\s\S]*?\}\([\s\S]*?\.split\(['"]\|['"]\)[\s\S]*?\)\s*\)/g;
-      var pm;
-      while ((pm = packedRe.exec(html)) !== null) {
-        var unpacked = unpackPackedJs(pm[0]);
-        if (unpacked) {
-          var wurlMatch = unpacked.match(/MDCore\.wurl\s*=\s*["']([^"']+)["']/i);
-          if (wurlMatch) {
-            source = wurlMatch[1];
-            break;
-          }
-          var srcMatch = unpacked.match(/(?:source|src)\s*[:=]\s*["']([^"']+\.mp4[^"']*)["']/i);
-          if (srcMatch) {
-            source = srcMatch[1];
-            break;
-          }
-        }
-      }
-
-      if (!source) {
-        var directMatch = html.match(/(?:source|src)\s*[:=]\s*["']([^"']+\.mp4[^"']*)["']/i);
-        if (directMatch) source = directMatch[1];
-      }
-
-      if (!source) return Promise.reject(new Error('Mixdrop: direct URL not found'));
-      if (source.startsWith('//')) source = 'https:' + source;
-
-      return {
-        url: source,
-        name: 'Eurostreaming - MixDrop',
-        title: 'MixDrop [ITA]',
-        quality: '720p',
-        headers: {
-          'User-Agent': ES_UA,
-          'Referer': origin + '/'
-        },
-        behaviorHints: {
-          notWebReady: true,
-          proxyHeaders: {
-            request: {
-              'User-Agent': ES_UA,
-              'Referer': origin + '/'
-            }
-          }
-        }
-      };
-    });
+function _followRedirector(url, referer, jar) {
+  return _clickaFetch(url, referer, jar).then(function (res) {
+    var text = res.text;
+    var metaM = text.match(/<meta[^>]+http-equiv=["']?refresh["']?[^>]+url=["']?([^"'>\s]+)/i);
+    if (metaM) {
+      var upUrl = _resolveUrl(metaM[1], url);
+      if (upUrl) return upUrl;
+    }
+    var canM = text.match(/<link[^>]+rel=["']?canonical["']?[^>]+href=["']([^"']+)["']/i);
+    if (canM) return canM[1];
+    var formM = text.match(/<form[^>]+action=["']([^"']+)["']/i);
+    if (formM && formM[1] && formM[1] !== '#') {
+      var actionUrl = _resolveUrl(formM[1], res.url || url);
+      if (actionUrl) return actionUrl;
+    }
+    var dlM = text.match(new RegExp('https?://[^\\s"\'>]*(?:deltabit|turbovid|' + MD_PAT + ')[^\\s"\'>]*', 'i'));
+    if (dlM) return dlM[0];
+    return res.url || url;
+  });
 }
 
+// =========================================================================
+// CLICKA.CC MAIN RESOLVER
+// =========================================================================
+function resolveClickacc(startUrl, kind, jar) {
+  var current = startUrl;
+  var ES_DOMAIN = 'https://eurostreamings.live';
+  var referer = ES_DOMAIN + '/';
+  var activeJar = jar || {};
+  function loop(hop) {
+    if (hop >= 6) return Promise.reject(new Error('Clickacc: max hops reached'));
+    var isRedirector = false;
+    try {
+      var uHost = _getUrlHost(current);
+      var uPath = _getUrlPath(current);
+      isRedirector = (uHost === 'clicka.cc') && /^\/(adelta|tva|amix)\//.test(uPath);
+    } catch (e) { }
+    if (isRedirector) {
+      return _followRedirector(current, referer, activeJar).then(function (upUrl) {
+        if (upUrl === current) return Promise.reject(new Error('Clickacc: redirector did not resolve'));
+        referer = current;
+        current = upUrl;
+        return loop(hop + 1);
+      });
+    }
+    if (kind === 'mix' && _isMixdropHost(current)) {
+      var mixMatch = current.match(/\/(?:e|f|emb|embed)\/([A-Za-z0-9]+)/i);
+      if (mixMatch) {
+        return tryMixDropHosts(mixMatch[1]).then(function (res) {
+          return {
+            url: res.url,
+            name: "Eurostreaming - MixDrop",
+            title: "MixDrop [ITA]",
+            quality: "720p",
+            headers: { "User-Agent": ES_UA, "Referer": "https://" + res.host + "/" },
+            behaviorHints: { notWebReady: true, proxyHeaders: { request: { "User-Agent": ES_UA, "Referer": "https://" + res.host + "/" } } }
+          };
+        }).catch(function () {
+          return Promise.reject(new Error('MixDrop extraction failed'));
+        });
+      }
+    }
+    if (kind === 'tv' && _isTurbovidHost(current)) {
+      return extractTurbovid(current, activeJar).then(function (video) {
+        return {
+          url: video.url,
+          name: "Eurostreaming - Turbovid",
+          title: "Turbovid [ITA]",
+          quality: "1080p",
+          headers: { "User-Agent": video.headers["User-Agent"] || ES_UA, "Referer": current, "Origin": video.headers["Origin"] || "https://turbovid.eu" },
+          behaviorHints: { notWebReady: true, proxyHeaders: { request: { "User-Agent": video.headers["User-Agent"] || ES_UA, "Referer": current, "Origin": video.headers["Origin"] || "https://turbovid.eu" } } }
+        };
+      });
+    }
+    if (kind === 'delta' && _isDeltabitHost(current)) {
+      return extractDeltabit(current, activeJar).then(function (video) {
+        return {
+          url: video.url,
+          name: "Eurostreaming - DeltaBit",
+          title: "DeltaBit [ITA]",
+          quality: "1080p",
+          headers: { "User-Agent": video.headers["User-Agent"] || ES_UA, "Referer": current, "Origin": video.headers["Origin"] || "https://deltabit.co" },
+          behaviorHints: { notWebReady: true, proxyHeaders: { request: { "User-Agent": video.headers["User-Agent"] || ES_UA, "Referer": current, "Origin": video.headers["Origin"] || "https://deltabit.co" } } }
+        };
+      });
+    }
+    return _clickaFetch(current, referer, activeJar).then(function (res) {
+      var text = res.text;
+      var finalUrl = res.url || current;
+      if (_hasCaptcha(text)) {
+        return _solveCaptchaPage(text, finalUrl, activeJar).then(function (solved) {
+          text = solved.text;
+          var proceedUrl = _findProceedToVideoUrl(text);
+          if (proceedUrl && proceedUrl !== current) {
+            referer = finalUrl;
+            current = proceedUrl;
+            return loop(hop + 1);
+          }
+          if (kind === 'mix') {
+            var md = _findMixdropUrl(text);
+            if (md) return tryMixDropHosts(md.id).then(function (res) {
+              return {
+                url: res.url,
+                name: "Eurostreaming - MixDrop",
+                title: "MixDrop [ITA]",
+                quality: "720p",
+                headers: { "User-Agent": ES_UA, "Referer": "https://" + res.host + "/" },
+                behaviorHints: { notWebReady: true, proxyHeaders: { request: { "User-Agent": ES_UA, "Referer": "https://" + res.host + "/" } } }
+              };
+            });
+          }
+          var m3u8Url = _findM3u8(text);
+          if (m3u8Url) return { url: m3u8Url, name: 'Eurostreaming', title: 'Stream', behaviorHints: { notWebReady: true } };
+          var nextUrl = _findNextUprotUrl(text, finalUrl);
+          if (!nextUrl || nextUrl === current) return Promise.reject(new Error('Clickacc: no next URL after captcha'));
+          referer = finalUrl;
+          current = nextUrl;
+          return loop(hop + 1);
+        });
+      }
+      var proceedUrl2 = _findProceedToVideoUrl(text);
+      if (proceedUrl2 && proceedUrl2 !== current) {
+        referer = finalUrl;
+        current = proceedUrl2;
+        return loop(hop + 1);
+      }
+      if (kind === 'mix') {
+        var md2 = _findMixdropUrl(text);
+        if (md2) return tryMixDropHosts(md2.id).then(function (res) {
+          return {
+            url: res.url,
+            name: "Eurostreaming - MixDrop",
+            title: "MixDrop [ITA]",
+            quality: "720p",
+            headers: { "User-Agent": ES_UA, "Referer": "https://" + res.host + "/" },
+            behaviorHints: { notWebReady: true, proxyHeaders: { request: { "User-Agent": ES_UA, "Referer": "https://" + res.host + "/" } } }
+          };
+        });
+      }
+      var m3u8Url2 = _findM3u8(text);
+      if (m3u8Url2) return { url: m3u8Url2, name: 'Eurostreaming', title: 'Stream', behaviorHints: { notWebReady: true } };
+      var nextUrl2 = _findNextUprotUrl(text, finalUrl);
+      if (!nextUrl2 || nextUrl2 === current) return Promise.reject(new Error('Clickacc: dead end'));
+      referer = finalUrl;
+      current = nextUrl2;
+      return loop(hop + 1);
+    });
+  }
+  return loop(0);
+}
+
+// =========================================================================
+// TMDB API helper
+// =========================================================================
 var TMDB_API_KEY = '68e094699525b18a70bab2f86b1fa706';
 
 // =========================================================================
@@ -1271,11 +1397,7 @@ function searchSeries(domain, title, seasonNum, cb) {
       var ratio = matchCount / targetTokens.length;
       if (ratio < 1.0) return 0;
       if (targetTokens.length === 1) {
-        var extraWords = candidateTokens.filter(function(w) { return w !== targetTokens[0]; });
-        var cleanExtra = extraWords.filter(function(w) {
-          return ['sub', 'ita', 'season', 'stagione', 'tv', 'show', 'hd'].indexOf(w) === -1;
-        });
-        if (cleanExtra.length > 0) return 10;
+        if (candidateTokens.indexOf(targetTokens[0]) >= 0) return 80;
       }
       var lenDiff = Math.abs(candidateTokens.length - targetTokens.length);
       return 90 - lenDiff;
