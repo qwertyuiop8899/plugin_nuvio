@@ -574,4 +574,823 @@ function _resolveCaptchaAndSubmit(pageUrl, html, jar) {
         'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
         'Content-Type': 'application/x-www-form-urlencoded',
         'Origin': _getUrlOrigin(pageUrl),
-        'Referer':
+        'Referer': pageUrl
+      };
+      var cstr = _jarGet(pageUrl, jar);
+      if (cstr) postHeaders['Cookie'] = cstr;
+
+      _customFetch(action, {
+        method: 'POST',
+        headers: postHeaders,
+        body: _formEncode(formData),
+        redirect: 'manual'
+      }, 15000)
+        .then(function (r) {
+          try {
+            var sc = r.headers.get('set-cookie') || r.headers.get('Set-Cookie');
+            if (sc) _jarSet(pageUrl, sc, jar);
+          } catch (e) { }
+          if (r.status >= 300 && r.status < 400) {
+            var loc = r.headers.get('location') || r.headers.get('Location');
+            if (loc) {
+              return resolve({ redirectedUrl: _resolveUrl(loc, action) });
+            }
+          }
+          return r.text().then(function (txt) {
+            resolve({ html: txt, url: action });
+          });
+        })
+        .catch(function (err) { resolve(null); });
+    }
+
+    if (imgSrc.startsWith('data:image/')) {
+      var commaIdx = imgSrc.indexOf(',');
+      var b64 = imgSrc.substring(commaIdx + 1);
+      var binaryStr = _atob(b64);
+      var u8 = new Uint8Array(binaryStr.length);
+      for (var bi = 0; bi < binaryStr.length; bi++) {
+        u8[bi] = binaryStr.charCodeAt(bi);
+      }
+      doSolve(u8);
+    } else {
+      var fullImgUrl = _resolveUrl(imgSrc, pageUrl);
+      var imgHeaders = {
+        'User-Agent': ES_UA,
+        'Referer': pageUrl
+      };
+      var cstr = _jarGet(pageUrl, jar);
+      if (cstr) imgHeaders['Cookie'] = cstr;
+
+      _customFetch(fullImgUrl, { headers: imgHeaders }, 10000)
+        .then(function (r) {
+          try {
+            var sc = r.headers.get('set-cookie') || r.headers.get('Set-Cookie');
+            if (sc) _jarSet(pageUrl, sc, jar);
+          } catch (e) { }
+          return r.arrayBuffer();
+        })
+        .then(function (ab) { doSolve(new Uint8Array(ab)); })
+        .catch(function () { resolve(null); });
+    }
+  });
+}
+
+// =========================================================================
+// CLICKA.CC RESOLVER
+// =========================================================================
+function resolveClickacc(clickaUrl, kind, jar) {
+  var maxRedirects = 10;
+  var currentUrl = clickaUrl;
+  var referer = 'https://eurostreamings.live/';
+
+  function next() {
+    if (maxRedirects-- <= 0) return Promise.reject(new Error('Clickacc: too many redirects'));
+
+    var headers = {
+      'User-Agent': ES_UA,
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
+      'Referer': referer
+    };
+    var cookieStr = _jarGet(currentUrl, jar);
+    if (cookieStr) headers['Cookie'] = cookieStr;
+
+    return _customFetch(currentUrl, { headers: headers, redirect: 'manual' }, 15000)
+      .then(function (r) {
+        try {
+          var sc = r.headers.get('set-cookie') || r.headers.get('Set-Cookie');
+          if (sc) _jarSet(currentUrl, sc, jar);
+        } catch (e) { }
+
+        if (r.status >= 300 && r.status < 400) {
+          var loc = r.headers.get('location') || r.headers.get('Location');
+          if (!loc) return Promise.reject(new Error('Clickacc: redirect without Location'));
+          var nextUrl = _resolveUrl(loc, currentUrl);
+          referer = currentUrl;
+          currentUrl = nextUrl;
+
+          var destHostname = _getUrlHostname(nextUrl);
+          if (destHostname.indexOf('clicka.cc') >= 0 || destHostname.indexOf('safego.cc') >= 0) {
+            return next();
+          }
+
+          if (destHostname.indexOf('turbovid') >= 0) {
+            return extractTurbovid(nextUrl, jar).then(function (res) {
+              return { url: res.url, name: 'Eurostreaming - Turbovid', title: 'Turbovid [ITA]', quality: '1080p', headers: res.headers };
+            });
+          }
+          if (destHostname.indexOf('deltabit') >= 0) {
+            return extractDeltabit(nextUrl, jar).then(function (res) {
+              return { url: res.url, name: 'Eurostreaming - DeltaBit', title: 'DeltaBit [ITA]', quality: '1080p', headers: res.headers };
+            });
+          }
+          if (destHostname.indexOf('mixdrop') >= 0) {
+            return extractMixdrop(nextUrl);
+          }
+          return { url: nextUrl, name: 'Eurostreaming - Direct', title: 'Direct', quality: 'HD' };
+        }
+
+        return r.text().then(function (html) {
+          var intermediateMatch = html.match(/https?:\/\/(?:www\.)?safego\.cc\/[A-Za-z0-9]+/i);
+          if (intermediateMatch && intermediateMatch[0] !== currentUrl) {
+            referer = currentUrl;
+            currentUrl = intermediateMatch[0];
+            return next();
+          }
+
+          var turbovidMatch = html.match(/https?:\/\/[a-z0-9_\-.]*turbovid[a-z0-9_\-.]*\/[a-zA-Z0-9_\-]+/i);
+          if (turbovidMatch) {
+            return extractTurbovid(turbovidMatch[0], jar).then(function (res) {
+              return { url: res.url, name: 'Eurostreaming - Turbovid', title: 'Turbovid [ITA]', quality: '1080p', headers: res.headers };
+            });
+          }
+
+          var deltabitMatch = html.match(/https?:\/\/[a-z0-9_\-.]*deltabit[a-z0-9_\-.]*\/[a-zA-Z0-9_\-]+/i);
+          if (deltabitMatch) {
+            return extractDeltabit(deltabitMatch[0], jar).then(function (res) {
+              return { url: res.url, name: 'Eurostreaming - DeltaBit', title: 'DeltaBit [ITA]', quality: '1080p', headers: res.headers };
+            });
+          }
+
+          var mixdropMatch = html.match(/https?:\/\/[a-z0-9_\-.]*mixdrop[a-z0-9_\-.]*\/[a-zA-Z0-9_\-]+/i);
+          if (mixdropMatch) {
+            return extractMixdrop(mixdropMatch[0]);
+          }
+
+          return _resolveCaptchaAndSubmit(currentUrl, html, jar).then(function (captchaResult) {
+            if (!captchaResult) return Promise.reject(new Error('Clickacc: captcha resolution failed'));
+            if (captchaResult.redirectedUrl) {
+              referer = currentUrl;
+              currentUrl = captchaResult.redirectedUrl;
+              return next();
+            }
+            if (captchaResult.html) {
+              var tMatch = captchaResult.html.match(/https?:\/\/[a-z0-9_\-.]*turbovid[a-z0-9_\-.]*\/[a-zA-Z0-9_\-]+/i);
+              if (tMatch) {
+                return extractTurbovid(tMatch[0], jar).then(function (res) {
+                  return { url: res.url, name: 'Eurostreaming - Turbovid', title: 'Turbovid [ITA]', quality: '1080p', headers: res.headers };
+                });
+              }
+              var dMatch = captchaResult.html.match(/https?:\/\/[a-z0-9_\-.]*deltabit[a-z0-9_\-.]*\/[a-zA-Z0-9_\-]+/i);
+              if (dMatch) {
+                return extractDeltabit(dMatch[0], jar).then(function (res) {
+                  return { url: res.url, name: 'Eurostreaming - DeltaBit', title: 'DeltaBit [ITA]', quality: '1080p', headers: res.headers };
+                });
+              }
+            }
+            return Promise.reject(new Error('Clickacc: unhandled page structure'));
+          });
+        });
+      });
+  }
+
+  var curHostname = _getUrlHostname(clickaUrl);
+  if (curHostname.indexOf('clicka.cc') >= 0 || curHostname.indexOf('safego.cc') >= 0) {
+    return _customFetch(clickaUrl, { headers: { 'User-Agent': ES_UA, 'Referer': referer }, redirect: 'manual' }, 10000).then(function (firstRes) {
+      try {
+        var sc = firstRes.headers.get('set-cookie') || firstRes.headers.get('Set-Cookie');
+        if (sc) _jarSet(clickaUrl, sc, jar);
+      } catch (e) { }
+      if (firstRes.status >= 300 && firstRes.status < 400) {
+        var loc = firstRes.headers.get('location') || firstRes.headers.get('Location');
+        if (loc) {
+          referer = clickaUrl;
+          currentUrl = _resolveUrl(loc, clickaUrl);
+        }
+      }
+      return next();
+    });
+  }
+  return next();
+}
+
+// =========================================================================
+// TURBOVID EXTRACTION
+// =========================================================================
+function extractTurbovid(pageUrl, jar) {
+  return new Promise(function (resolve, reject) {
+    var landingHeaders = {
+      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.8,it;q=0.7',
+      'Accept-Encoding': 'identity',
+      'Referer': 'https://safego.cc/'
+    };
+    var cookieStr = _jarGet(pageUrl, jar);
+    if (cookieStr) landingHeaders['Cookie'] = cookieStr;
+    _customFetch(pageUrl, { headers: landingHeaders, redirect: "manual" }, 15000)
+      .then(function (r) {
+        try {
+          if (r.headers && r.headers.get) {
+            var sc = r.headers.get('set-cookie') || r.headers.get('Set-Cookie');
+            if (sc) _jarSet(pageUrl, sc, jar);
+          }
+        } catch (e) { }
+        return r.text();
+      })
+      .then(function (html) {
+        var finalOrigin = _getUrlOrigin(pageUrl);
+        var source = _findStreamSource(html);
+        if (source) return resolve({ url: source, headers: { 'User-Agent': landingHeaders['User-Agent'], 'Referer': pageUrl, 'Origin': finalOrigin } });
+
+        var formData = {};
+        var ir = /<input\b[^>]*>/gi;
+        var im;
+        while ((im = ir.exec(html))) {
+          var tag = im[0];
+          var nameM = tag.match(/\bname=(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i);
+          if (!nameM) continue;
+          var name = _decodeEntities(nameM[1] || nameM[2] || nameM[3] || '');
+          var valueM = tag.match(/\bvalue=(?:"([^"]*)"|'([^']*)'|([^\s>]*))/i);
+          var value = valueM ? _decodeEntities(valueM[1] || valueM[2] || valueM[3] || '') : '';
+          if (name) formData[name] = value;
+        }
+        if (!formData.op) { return reject(new Error('Turbovid: form op not found')); }
+        formData.imhuman = 'Proceed+to+video';
+        formData.referer = pageUrl;
+        var postHeaders = {
+          'User-Agent': landingHeaders['User-Agent'],
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.8,it;q=0.7',
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Origin': finalOrigin,
+          'Referer': pageUrl
+        };
+        var cookieStr2 = _jarGet(pageUrl, jar);
+        if (cookieStr2) postHeaders['Cookie'] = cookieStr2;
+
+        return _sleep(5000).then(function () {
+          return _customFetch(pageUrl, { method: "POST", headers: postHeaders, body: _formEncode(formData), redirect: "manual" }, 30000);
+        });
+      })
+      .then(function (r) {
+        try {
+          if (r.headers && r.headers.get) {
+            var sc = r.headers.get('set-cookie') || r.headers.get('Set-Cookie');
+            if (sc) _jarSet(pageUrl, sc, jar);
+          }
+        } catch (e) { }
+        return r.text();
+      })
+      .then(function (html) {
+        var finalOrigin = _getUrlOrigin(pageUrl);
+        var source = _findStreamSource(html);
+        if (!source) {
+          var combined = html;
+          var packerRe = /eval\(function\(p,a,c,k,e,d\)[\s\S]*?\}\([\s\S]*?\.split\(['"]\|['"]\)[\s\S]*?\)\s*\)/g;
+          var pm;
+          while ((pm = packerRe.exec(html)) !== null) {
+            var unpacked = unpackPackedJs(pm[0]);
+            if (unpacked) {
+              combined += '\n' + unpacked;
+            }
+          }
+          source = _findStreamSource(combined);
+        }
+        if (!source) {
+          var retryHeaders = {
+            'User-Agent': landingHeaders['User-Agent'],
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.8,it;q=0.7',
+            'Accept-Encoding': 'identity',
+            'Referer': 'https://safego.cc/'
+          };
+          var cstr = _jarGet(pageUrl, jar);
+          if (cstr) retryHeaders['Cookie'] = cstr;
+          return _customFetch(pageUrl, { headers: retryHeaders, redirect: "manual" }, 15000)
+            .then(function (r2) { return r2.text(); })
+            .then(function (html2) {
+              source = _findStreamSource(html2);
+              if (!source) return reject(new Error('Turbovid: stream source not found'));
+              resolve({ url: source, headers: { 'User-Agent': landingHeaders['User-Agent'], 'Referer': pageUrl, 'Origin': finalOrigin } });
+            });
+        }
+        resolve({ url: source, headers: { 'User-Agent': landingHeaders['User-Agent'], 'Referer': pageUrl, 'Origin': finalOrigin } });
+      })
+      .catch(function (err) { reject(err); });
+  });
+}
+
+// =========================================================================
+// DELTABIT EXTRACTION
+// =========================================================================
+function extractDeltabit(pageUrl, jar) {
+  return new Promise(function (resolve, reject) {
+    var landingHeaders = {
+      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.8,it;q=0.7',
+      'Accept-Encoding': 'identity',
+      'Referer': 'https://safego.cc/'
+    };
+    var cookieStr = _jarGet(pageUrl, jar);
+    if (cookieStr) landingHeaders['Cookie'] = cookieStr;
+    _customFetch(pageUrl, { headers: landingHeaders }, 15000)
+      .then(function (r) {
+        try {
+          if (r.headers && r.headers.get) {
+            var sc = r.headers.get('set-cookie') || r.headers.get('Set-Cookie');
+            if (sc) _jarSet(pageUrl, sc, jar);
+          }
+        } catch (e) { }
+        return r.text();
+      })
+      .then(function (html) {
+        var finalOrigin = _getUrlOrigin(pageUrl);
+        var source = _findStreamSource(html);
+        if (source) return resolve({ url: source, headers: { 'User-Agent': landingHeaders['User-Agent'], 'Referer': pageUrl, 'Origin': finalOrigin } });
+
+        var formData = {};
+        var ir = /<input\b[^>]*>/gi;
+        var im;
+        while ((im = ir.exec(html))) {
+          var tag = im[0];
+          var nameM = tag.match(/\bname=(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i);
+          if (!nameM) continue;
+          var name = _decodeEntities(nameM[1] || nameM[2] || nameM[3] || '');
+          var valueM = tag.match(/\bvalue=(?:"([^"]*)"|'([^']*)'|([^\s>]*))/i);
+          var value = valueM ? _decodeEntities(valueM[1] || valueM[2] || valueM[3] || '') : '';
+          if (name) formData[name] = value;
+        }
+        if (!formData.op) return reject(new Error('Deltabit: form op not found'));
+        formData.imhuman = '';
+        formData.referer = pageUrl;
+        var postHeaders = {
+          'User-Agent': landingHeaders['User-Agent'],
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.8,it;q=0.7',
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Origin': finalOrigin,
+          'Referer': pageUrl
+        };
+        var cookieStr2 = _jarGet(pageUrl, jar);
+        if (cookieStr2) postHeaders['Cookie'] = cookieStr2;
+
+        return _sleep(2500).then(function () {
+          return _customFetch(pageUrl, { method: "POST", headers: postHeaders, body: _formEncode(formData), redirect: "manual" }, 30000);
+        });
+      })
+      .then(function (r) {
+        try {
+          if (r.headers && r.headers.get) {
+            var sc = r.headers.get('set-cookie') || r.headers.get('Set-Cookie');
+            if (sc) _jarSet(pageUrl, sc, jar);
+          }
+        } catch (e) { }
+        return r.text();
+      })
+      .then(function (html) {
+        var finalOrigin = _getUrlOrigin(pageUrl);
+        var source = _findStreamSource(html);
+        if (!source) {
+          var combined = html;
+          var packerRe = /eval\(function\(p,a,c,k,e,d\)[\s\S]*?\}\([\s\S]*?\.split\(['"]\|['"]\)[\s\S]*?\)\s*\)/g;
+          var pm;
+          while ((pm = packerRe.exec(html)) !== null) {
+            var unpacked = unpackPackedJs(pm[0]);
+            if (unpacked) {
+              combined += '\n' + unpacked;
+            }
+          }
+          source = _findStreamSource(combined);
+        }
+        if (!source) return reject(new Error('Deltabit: stream source not found'));
+        resolve({ url: source, headers: { 'User-Agent': landingHeaders['User-Agent'], 'Referer': pageUrl, 'Origin': finalOrigin } });
+      })
+      .catch(function (err) { reject(err); });
+  });
+}
+
+// =========================================================================
+// MIXDROP EXTRACTION
+// =========================================================================
+function extractMixdrop(embedUrl) {
+  var normalizedUrl = embedUrl.replace('/f/', '/e/');
+  var origin = _getUrlOrigin(normalizedUrl);
+  var headers = {
+    'User-Agent': ES_UA,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.8,it;q=0.7',
+    'Referer': normalizedUrl
+  };
+
+  return _customFetch(normalizedUrl, { headers: headers }, 15000)
+    .then(function (r) { return r.text(); })
+    .then(function (html) {
+      var source = null;
+      var packedRe = /eval\(function\(p,a,c,k,e,d\)[\s\S]*?\}\([\s\S]*?\.split\(['"]\|['"]\)[\s\S]*?\)\s*\)/g;
+      var pm;
+      while ((pm = packedRe.exec(html)) !== null) {
+        var unpacked = unpackPackedJs(pm[0]);
+        if (unpacked) {
+          var wurlMatch = unpacked.match(/MDCore\.wurl\s*=\s*["']([^"']+)["']/i);
+          if (wurlMatch) {
+            source = wurlMatch[1];
+            break;
+          }
+          var srcMatch = unpacked.match(/(?:source|src)\s*[:=]\s*["']([^"']+\.mp4[^"']*)["']/i);
+          if (srcMatch) {
+            source = srcMatch[1];
+            break;
+          }
+        }
+      }
+
+      if (!source) {
+        var directMatch = html.match(/(?:source|src)\s*[:=]\s*["']([^"']+\.mp4[^"']*)["']/i);
+        if (directMatch) source = directMatch[1];
+      }
+
+      if (!source) return Promise.reject(new Error('Mixdrop: direct URL not found'));
+      if (source.startsWith('//')) source = 'https:' + source;
+
+      return {
+        url: source,
+        name: 'Eurostreaming - MixDrop',
+        title: 'MixDrop [ITA]',
+        quality: '720p',
+        headers: {
+          'User-Agent': ES_UA,
+          'Referer': origin + '/'
+        },
+        behaviorHints: {
+          notWebReady: true,
+          proxyHeaders: {
+            request: {
+              'User-Agent': ES_UA,
+              'Referer': origin + '/'
+            }
+          }
+        }
+      };
+    });
+}
+
+var TMDB_API_KEY = '68e094699525b18a70bab2f86b1fa706';
+
+// =========================================================================
+// ENTRY POINT
+// =========================================================================
+var _streamCache = {};
+
+function getCinemetaMeta(type, imdbId, cb) {
+  var cleanId = String(imdbId || '').split(':')[0];
+  var url = 'https://v3-cinemeta.strem.io/meta/' + type + '/' + cleanId + '.json';
+  _customFetch(url, {}, 10000)
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (data) { cb(null, data && data.meta ? data.meta : null); })
+    .catch(function () { cb(null, null); });
+}
+
+function _getTmdbShowMeta(id) {
+  return new Promise(function (resolve) {
+    var cleanId = String(id || '').replace(/^tmdb:/i, '').trim();
+    var baseId = cleanId.split(':')[0];
+    if (/^tt\d+$/i.test(baseId)) {
+      _customFetch("https://api.themoviedb.org/3/find/" + baseId + "?api_key=" + TMDB_API_KEY + "&external_source=imdb_id&language=it-IT", {}, 10000)
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (data) {
+          if (!data) return resolve(null);
+          if (data.tv_results && data.tv_results.length > 0) {
+            var tv = data.tv_results[0];
+            return resolve({ name: tv.name, original_name: tv.original_name, year: String(tv.first_air_date || '').substring(0, 4) });
+          }
+          resolve(null);
+        })
+        .catch(function () { resolve(null); });
+    } else if (/^\d+$/.test(baseId)) {
+      _customFetch("https://api.themoviedb.org/3/tv/" + baseId + "?api_key=" + TMDB_API_KEY + "&language=it-IT", {}, 10000)
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (data) {
+          if (!data) return resolve(null);
+          resolve({ name: data.name, original_name: data.original_name, year: String(data.first_air_date || '').substring(0, 4) });
+        })
+        .catch(function () { resolve(null); });
+    } else {
+      resolve(null);
+    }
+  });
+}
+
+function getStreams(id, type, season, episode, providerContext) {
+  var userCb = null;
+  if (typeof episode === 'function') {
+    userCb = episode;
+    episode = season;
+    season = type;
+    type = 'series';
+  } else if (typeof providerContext === 'function') {
+    userCb = providerContext;
+  }
+
+  var promise = new Promise(function (resolve, reject) {
+    if (id && typeof id === 'object' && !Array.isArray(id)) {
+      var obj = id;
+      id = obj.id || obj.tmdbId || obj.imdbId;
+      type = obj.type || obj.mediaType || type;
+      season = obj.season || obj.seasonNum || season;
+      episode = obj.episode || obj.episodeNum || episode;
+      providerContext = obj.providerContext || obj;
+    }
+    var cleanId = String(id || '').replace(/^tmdb:/i, '').trim();
+    var idParts = cleanId.split(':');
+    var rawId = idParts[0];
+
+    var seasonNum = Number(season);
+    var episodeNum = Number(episode);
+    if ((!seasonNum || isNaN(seasonNum)) && idParts.length > 1) seasonNum = Number(idParts[1]);
+    if ((!episodeNum || isNaN(episodeNum)) && idParts.length > 2) episodeNum = Number(idParts[2]);
+    if (!seasonNum || isNaN(seasonNum) || seasonNum < 1) seasonNum = 1;
+    if (!episodeNum || isNaN(episodeNum) || episodeNum < 1) episodeNum = 1;
+
+    var mediaType = String(type || '').toLowerCase();
+    if (mediaType === 'movie' && (!season || seasonNum === 0)) return resolve([]);
+
+    var cacheKey = 'series_' + rawId + '_' + seasonNum + '_' + episodeNum;
+    var cached = _streamCache[cacheKey];
+    if (cached && (Date.now() - cached.timestamp < 7200000)) {
+      return resolve(cached.streams);
+    }
+
+    _getTmdbShowMeta(rawId).then(function (meta) {
+      if (!meta) {
+        return new Promise(function(resMeta) {
+          getCinemetaMeta('series', rawId, function(err, cMeta) {
+            if (cMeta && cMeta.name) resMeta({ name: cMeta.name, original_name: cMeta.name, year: cMeta.releaseInfo });
+            else resMeta(null);
+          });
+        });
+      }
+      return meta;
+    }).then(function (meta) {
+      if (!meta || (!meta.name && !meta.original_name)) return resolve([]);
+
+      var queries = [];
+      function addQuery(t) {
+        if (!t) return;
+        t = t.trim();
+        if (t && queries.indexOf(t) === -1) queries.push(t);
+        var clean = t.replace(/[:\-].*$/, '').trim();
+        if (clean && clean !== t && queries.indexOf(clean) === -1) queries.push(clean);
+      }
+
+      addQuery(meta.name);
+      addQuery(meta.original_name);
+
+      getEsDomain(function (domain) {
+        if (!domain) return resolve([]);
+
+        var qIdx = 0;
+        function tryNextQuery() {
+          if (qIdx >= queries.length) return resolve([]);
+          var q = queries[qIdx++];
+          searchSeries(domain, q, seasonNum, function (pageUrl) {
+            if (!pageUrl) return tryNextQuery();
+            extractLinksFromPage(domain, pageUrl, seasonNum, episodeNum, function (streams) {
+              var resStreams = streams || [];
+              if (resStreams.length > 0) {
+                _streamCache[cacheKey] = { streams: resStreams, timestamp: Date.now() };
+                return resolve(resStreams);
+              }
+              tryNextQuery();
+            });
+          });
+        }
+        tryNextQuery();
+      });
+    }).catch(function (e) {
+      resolve([]);
+    });
+  });
+
+  if (userCb) {
+    promise.then(function (res) { userCb(res || []); }).catch(function () { userCb([]); });
+  }
+  return promise;
+}
+
+function esFetch(url, cb) {
+  var ref = _getUrlOrigin(url) ? (_getUrlOrigin(url) + "/") : "https://eurostreamings.live/";
+  var headers = {
+    'User-Agent': ES_UA,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Referer': ref
+  };
+  _customFetch(url, { headers: headers }, 15000)
+    .then(function (r) { return r.text(); })
+    .then(function (text) { cb(null, text); })
+    .catch(function (err) { cb(err, null); });
+}
+
+var _cachedEsDomain = null;
+
+function getEsDomain(cb) {
+  if (_cachedEsDomain) return cb(_cachedEsDomain);
+  _customFetch("https://raw.githubusercontent.com/qwertyuiop8899/streamvix/main/config/domains.json", {}, 10000)
+    .then(function (r) { return r.text(); })
+    .then(function (data) {
+      try {
+        var json = JSON.parse(data);
+        var d = json && json.eurostreaming;
+        if (d) {
+          var domainStr = typeof d === 'string' ? d : d.domain;
+          if (domainStr) {
+            _cachedEsDomain = 'https://' + domainStr;
+            return cb(_cachedEsDomain);
+          }
+        }
+        var ee = json && json['easter-egg'];
+        if (ee && ee.eurostreaming) {
+          var domainStr2 = typeof ee.eurostreaming === 'string' ? ee.eurostreaming : ee.eurostreaming.domain;
+          if (domainStr2) {
+            _cachedEsDomain = 'https://' + domainStr2;
+            return cb(_cachedEsDomain);
+          }
+        }
+      } catch (e) {
+        var lines = data.split('\n');
+        for (var i = 0; i < lines.length; i++) {
+          if (lines[i].indexOf('eurostreaming') >= 0) {
+            var parts = lines[i].split('=');
+            if (parts.length > 1 && parts[1].trim()) {
+              var dom = parts[1].trim();
+              if (!dom.startsWith('http')) dom = 'https://' + dom;
+              _cachedEsDomain = dom;
+              return cb(_cachedEsDomain);
+            }
+          }
+        }
+      }
+      _cachedEsDomain = 'https://eurostreamings.live';
+      cb(_cachedEsDomain);
+    })
+    .catch(function () {
+      _cachedEsDomain = 'https://eurostreamings.live';
+      cb(_cachedEsDomain);
+    });
+}
+
+function searchSeries(domain, title, seasonNum, cb) {
+  var query = title;
+  esFetch(domain + '/?s=' + encodeURIComponent(query), function (err, html) {
+    if (err || !html) return cb(null);
+
+    function normalizeTitle(t) {
+      if (!t) return '';
+      return t
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim()
+        .replace(/\s+/g, ' ');
+    }
+
+    function cleanPostTitle(title) {
+      if (!title) return '';
+      return title
+        .replace(/\(\d{4}\)/g, '')
+        .replace(/-\s*stagione\s*\d+/gi, '')
+        .replace(/streaming/gi, '')
+        .replace(/serie\s*tv/gi, '')
+        .trim();
+    }
+
+    function scoreTitleMatch(target, candidate) {
+      var normTarget = normalizeTitle(target);
+      var normCandidate = normalizeTitle(cleanPostTitle(candidate));
+      if (normTarget === normCandidate) return 100;
+      var targetTokens = normTarget.split(' ').filter(Boolean);
+      var candidateTokens = normCandidate.split(' ').filter(Boolean);
+      if (targetTokens.length === 0 || candidateTokens.length === 0) return 0;
+      var matchCount = 0;
+      targetTokens.forEach(function(tok) {
+        if (candidateTokens.indexOf(tok) >= 0) matchCount++;
+      });
+      var ratio = matchCount / targetTokens.length;
+      if (ratio < 1.0) return 0;
+      if (targetTokens.length === 1) {
+        var extraWords = candidateTokens.filter(function(w) { return w !== targetTokens[0]; });
+        var cleanExtra = extraWords.filter(function(w) {
+          return ['sub', 'ita', 'season', 'stagione', 'tv', 'show', 'hd'].indexOf(w) === -1;
+        });
+        if (cleanExtra.length > 0) return 10;
+      }
+      var lenDiff = Math.abs(candidateTokens.length - targetTokens.length);
+      return 90 - lenDiff;
+    }
+
+    var entryPattern = /<li[^>]+id=["']post-(\d+)["'][^>]*class=["'][^"]*post[^"]*["'][^>]*>[\s\S]*?<h\d[^>]*>[\s\S]*?<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>[\s\S]*?<\/h\d>[\s\S]*?<\/li>/gi;
+    var match;
+    var candidates = [];
+    var seen = {};
+    while ((match = entryPattern.exec(html)) !== null) {
+      var href = match[2];
+      var linkText = (match[3] || '').replace(/<[^>]+>/g, '').trim();
+      var score = scoreTitleMatch(title, linkText);
+      if (!seen[href] && score > 0) {
+        seen[href] = true;
+        candidates.push({ href: href, score: score });
+      }
+    }
+
+    if (candidates.length === 0) {
+      var allLinks = html.match(/<a[^>]+href=["']([^"']+)["'][^>]*title=["']([^"']+)["'][^>]*>/gi);
+      if (allLinks) {
+        allLinks.forEach(function (a) {
+          var m = a.match(/href=["']([^"']+)["']/);
+          var t = a.match(/title=["']([^"']+)["']/i);
+          if (m && t && !seen[m[1]]) {
+            var score = scoreTitleMatch(title, t[1]);
+            if (score > 0) {
+              seen[m[1]] = true;
+              candidates.push({ href: m[1], score: score });
+            }
+          }
+        });
+      }
+    }
+
+    candidates.sort(function(a, b) { return b.score - a.score; });
+    var best = (candidates.length > 0 && candidates[0].score >= 50) ? candidates[0].href : null;
+    cb(best);
+  });
+}
+
+function extractLinksFromPage(domain, pageUrl, seasonNum, episodeNum, cb) {
+  esFetch(pageUrl, function (err, html) {
+    if (err || !html) return cb(null);
+    var streams = [];
+    var seen = {};
+
+    var ep2 = episodeNum < 10 ? '0' + String(episodeNum) : String(episodeNum);
+    var patterns = [
+      seasonNum + '\\s*(?:&#215;|×|x)\\s*0?' + episodeNum + '[\\s\\S]{0,8000}?(?=<br\\s*/?>|</div>)',
+      'S0?' + seasonNum + 'E' + ep2 + '[\\s\\S]{0,8000}?(?=<br\\s*/?>|</div>)'
+    ];
+    var block = null;
+    for (var pi = 0; pi < patterns.length; pi++) {
+      var m = html.match(new RegExp(patterns[pi], 'i'));
+      if (m) { block = m[0]; break; }
+    }
+    if (!block) block = html;
+
+    var clickaTasks = [];
+    var clickaRe = /https?:\/\/clicka\.cc\/(?:a?(tv|mix|delta))\/[A-Za-z0-9]+/gi;
+    var cm;
+    while ((cm = clickaRe.exec(block)) !== null) {
+      if (!seen[cm[0]]) { seen[cm[0]] = true; clickaTasks.push({ url: cm[0], kind: cm[1] }); }
+    }
+
+    if (clickaTasks.length === 0) return cb(streams.length > 0 ? streams : null);
+
+    var resolved = false;
+    var timer = setTimeout(function () {
+      if (!resolved) {
+        resolved = true;
+        cb(streams.length > 0 ? streams : null);
+      }
+    }, 25000);
+
+    var pending = clickaTasks.length;
+    clickaTasks.forEach(function (task) {
+      var taskJar = {};
+      var timeoutPromise = new Promise(function (_, reject) {
+        setTimeout(function () { reject(new Error('Timeout resolving link')); }, 15000);
+      });
+      Promise.race([
+        resolveClickacc(task.url, task.kind, taskJar),
+        timeoutPromise
+      ])
+        .then(function (streamObj) {
+          if (streamObj && streamObj.url && !seen[streamObj.url]) {
+            seen[streamObj.url] = true;
+            streams.push(streamObj);
+          }
+        })
+        .catch(function () { })
+        .then(function () {
+          pending--;
+          if (pending === 0 && !resolved) {
+            clearTimeout(timer);
+            resolved = true;
+            cb(streams.length > 0 ? streams : null);
+          }
+        });
+    });
+  });
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { getStreams: getStreams };
+}
+if (typeof global !== 'undefined') {
+  global.getStreams = getStreams;
+}
+if (typeof globalThis !== 'undefined') {
+  globalThis.getStreams = getStreams;
+}
+if (typeof window !== 'undefined') {
+  window.getStreams = getStreams;
+}
