@@ -1285,7 +1285,7 @@ function resolveClickacc(startUrl, kind, jar) {
           url: video.url,
           name: "Eurostreaming - Turbovid (Clicka)",
           title: "Turbovid (Clicka)",
-          quality: "1080p",
+          quality: "720p",
           behaviorHints: { notWebReady: true },
           headers: { "User-Agent": video.headers["User-Agent"] || ES_UA, "Referer": current, "Origin": video.headers["Origin"] || "https://turbovid.eu" }
         };
@@ -1297,7 +1297,7 @@ function resolveClickacc(startUrl, kind, jar) {
           url: video.url,
           name: "Eurostreaming - DeltaBit (Clicka)",
           title: "DeltaBit (Clicka)",
-          quality: "1080p",
+          quality: "720p",
           behaviorHints: { notWebReady: true },
           headers: { "User-Agent": video.headers["User-Agent"] || ES_UA, "Referer": current, "Origin": video.headers["Origin"] || "https://deltabit.co" }
         };
