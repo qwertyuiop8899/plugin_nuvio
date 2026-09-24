@@ -1,6 +1,6 @@
 {
   "name": "ToastFlix",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "scrapers": [
     {
       "id": "toastflix-cb01",
@@ -18,14 +18,14 @@
     {
       "id": "toastflix-eurostreaming",
       "name": "Eurostreaming",
-      "version": "1.0.7",
+      "version": "1.0.8",
       "description": "Serie TV da Eurostreaming",
       "resources": ["stream"],
       "contentLanguage": ["it"],
       "formats": ["mp4", "m3u8"],
       "idPrefixes": ["tmdb:", "tt"],
       "filename": "plugin_es_nuvio.js",
-      "supportedTypes": ["movie", "series", "tv"],
+      "supportedTypes": ["tv", "series"],
       "enabled": true
     }
   ]
